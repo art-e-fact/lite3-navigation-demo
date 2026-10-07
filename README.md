@@ -35,7 +35,8 @@ pixi run test-nav2-route-cpu         # force the CPU Newton build
 
 This starts the simulator with the Lite3 at the route's start, launches
 rl_deploy and Nav2 on the route's map, drives the route and asserts that the
-robot got round. World, simulator config and route result land in `results/`.
+robot got round. World, simulator config, route result, two videos (chase and
+overhead), the odom trace as CSV and charts land in `results/`.
 
 ### Record your own route
 

@@ -69,7 +69,7 @@ def warm_up(sim: NewtonSimulation, sensors: NewtonSensorManager | None, recorder
         sensors.warmup(sim.state_0, sim.timestamp)
     sim.rewind()
     if sensors is not None:
-        sensors.follow_camera.reset()
+        sensors.reset_cameras()
     if recorder is not None:
         # After the rewind, so the t=0 body transforms are the ones the run starts from.
         recorder.log_model(sim.state_0)
@@ -148,6 +148,7 @@ def run_newton(config: SimulationConfig, ros_args: list[str] | None = None):
         realsense=config.sensors.realsense,
         robosense=config.sensors.robosense,
         follow_camera=config.sensors.follow_camera,
+        overhead_camera=config.sensors.overhead_camera,
     )
     sim = NewtonSimulation(
         model_path=model_path,

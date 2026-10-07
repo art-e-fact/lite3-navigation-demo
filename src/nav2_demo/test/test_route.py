@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from artefacts_toolkit_navigation import follow_route, load_route, map_to_world, route_launch_args
 
+from report import path_chart, speed_chart, waypoint_chart, write_trace_csv
 from sim_control_harness import SimControlHarness, StopReason
 
 # Where the world, the simulator config and the route result go: Artefacts' upload
@@ -50,10 +51,14 @@ def test_route_is_completed(tmp_path, headless):
         'robot': {'model': 'lite3'},
         'sensors': {
             'lidar_2d': {'enabled': True, 'range_max': 12.0},
-            # A chase-camera video of the run, recorded by the simulator (headless too).
-            # Steeper than the default 18 deg so the 1 m walls do not hide the robot.
-            'follow_camera': {'enabled': True, 'video_path': str(OUTPUT_FOLDER / f'{route.name}.mp4'),
+            # Two videos of the run, recorded by the simulator (headless too): a chase
+            # camera, steeper than the default 18 deg so the 1 m walls do not hide the
+            # robot, and a top-down view that keeps the map's heading.
+            'follow_camera': {'enabled': True, 'video_path': str(OUTPUT_FOLDER / f'{route.name}_follow.mp4'),
                               'elevation_deg': -35.0},
+            'overhead_camera': {'enabled': True, 'video_path': str(OUTPUT_FOLDER / f'{route.name}_overhead.mp4'),
+                                'elevation_deg': -89.0, 'follow_yaw': False, 'distance_m': 10.0,
+                                'smoothing': 0.03},
         },
         'rerun': {'enabled': False},
     }
@@ -80,6 +85,14 @@ def test_route_is_completed(tmp_path, headless):
             route, timeout_s=ROUTE_TIMEOUT_SEC, startup_timeout_s=NAV2_STARTUP_TIMEOUT_SEC,
             label=route.name, results_dir=str(OUTPUT_FOLDER))
         reason = harness.stop_reason
+        trace = harness.trace
+
+    # The run's data, pass or fail: the odom trace as CSV and the charts.
+    waypoint_chart(result, OUTPUT_FOLDER / f'{route.name}_waypoints.html')
+    if trace:
+        write_trace_csv(trace, OUTPUT_FOLDER / f'{route.name}_odom.csv')
+        path_chart(REPO_ROOT / route.map.file, route, trace, OUTPUT_FOLDER / f'{route.name}_path.html')
+        speed_chart(trace, route, OUTPUT_FOLDER / f'{route.name}_speed.html')
 
     if reason is StopReason.SIM_EXITED:
         pytest.fail(f'simulation exited unexpectedly:\n{harness.sim_log_tail()}')

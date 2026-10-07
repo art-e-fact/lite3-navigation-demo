@@ -242,7 +242,8 @@ class NewtonFollowCameraRecorder:
             alpha = float(np.clip(self.config.smoothing, 0.0, 1.0))
             self._lookat = (1.0 - alpha) * self._lookat + alpha * target
 
-        azimuth = _yaw_from_quat_xyzw(body_q[3:7]) + math.radians(self.config.azimuth_offset_deg)
+        yaw = _yaw_from_quat_xyzw(body_q[3:7]) if self.config.follow_yaw else 0.0
+        azimuth = yaw + math.radians(self.config.azimuth_offset_deg)
         elevation = math.radians(self.config.elevation_deg)
         forward = np.array(
             [

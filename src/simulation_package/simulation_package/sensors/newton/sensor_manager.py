@@ -21,6 +21,7 @@ class NewtonSensorOptions:
     realsense: RealsenseConfig = field(default_factory=RealsenseConfig)
     robosense: RobosenseConfig = field(default_factory=RobosenseConfig)
     follow_camera: FollowCameraConfig = field(default_factory=FollowCameraConfig)
+    overhead_camera: FollowCameraConfig = field(default_factory=FollowCameraConfig)
 
     @property
     def enable_lidar(self) -> bool:
@@ -44,7 +45,7 @@ class NewtonSensorOptions:
 
     @property
     def enable_follow_camera(self) -> bool:
-        return self.follow_camera.enabled
+        return self.follow_camera.enabled or self.overhead_camera.enabled
 
 
 class NewtonSensorManager:
@@ -90,13 +91,27 @@ class NewtonSensorManager:
             viewer=viewer,
             bvh=None,  # assigned below once the shared BVH exists
         )
+        # Never the interactive window: that one is the follow camera's. This camera
+        # renders off its own offscreen viewer (or the raytracer without GL).
+        self.overhead_camera = NewtonFollowCameraRecorder(
+            model,
+            node,
+            config=options.overhead_camera,
+            robot_body_index=robot_body_index,
+            viewer=None,
+            bvh=None,
+        )
+        self.cameras = [
+            (self.follow_camera, max(1, int(round(1.0 / (options.follow_camera.fps * dt))))),
+            (self.overhead_camera, max(1, int(round(1.0 / (options.overhead_camera.fps * dt))))),
+        ]
 
         self.lidar_step_interval = max(1, int(1.0 / (options.lidar_2d.frequency_hz * dt)))
         self.mid360_step_interval = max(1, int(1.0 / (options.mid360.frequency_hz * dt)))
         self.depth_step_interval = max(1, int(1.0 / (options.realsense.frequency_hz * dt)))
-        self.follow_camera_step_interval = max(1, int(round(1.0 / (options.follow_camera.fps * dt))))
         self.bvh = NewtonBvh(model, state) if self.enabled else None
-        self.follow_camera.bvh = self.bvh
+        for camera, _ in self.cameras:
+            camera.bvh = self.bvh
         self._publish_static_transforms()
 
     @property
@@ -106,7 +121,7 @@ class NewtonSensorManager:
             or self.mid360.enabled
             or self.depth.enabled
             or self.robosense.enabled
-            or self.follow_camera.enabled
+            or any(camera.enabled for camera, _ in self.cameras)
         )
 
     def update(self, state, step_count: int, timestamp: float):
@@ -117,8 +132,9 @@ class NewtonSensorManager:
         due_mid360 = self.mid360.enabled and step_count % self.mid360_step_interval == 0
         due_depth = self.depth.enabled and step_count % self.depth_step_interval == 0
         due_robosense = self.robosense.any_due(step_count)
-        due_camera = self.follow_camera.enabled and step_count % self.follow_camera_step_interval == 0
-        if not (due_lidar or due_mid360 or due_depth or due_robosense or due_camera):
+        due_cameras = [camera for camera, interval in self.cameras
+                       if camera.enabled and step_count % interval == 0]
+        if not (due_lidar or due_mid360 or due_depth or due_robosense or due_cameras):
             return
 
         # Refit once for all due sensors; sensor rendering then sees the same world pose.
@@ -131,8 +147,8 @@ class NewtonSensorManager:
             self.depth.update(state, timestamp)
         if due_robosense:
             self.robosense.update(state, step_count, timestamp)
-        if due_camera:
-            self.follow_camera.update(state, refit=False, timestamp=timestamp)
+        for camera in due_cameras:
+            camera.update(state, refit=False, timestamp=timestamp)
 
     def warmup(self, state, timestamp: float = 0.0):
         """Render every enabled sensor once so their Warp kernels are compiled.
@@ -152,11 +168,18 @@ class NewtonSensorManager:
             self.depth.update(state, timestamp)
         if self.robosense.enabled:
             self.robosense.warmup(state, timestamp)
-        if self.follow_camera.enabled:
-            self.follow_camera.render(state, refit=False, timestamp=timestamp)
+        for camera, _ in self.cameras:
+            if camera.enabled:
+                camera.render(state, refit=False, timestamp=timestamp)
+
+    def reset_cameras(self):
+        """Forget the cameras' smoothed look-at points (after a warm-up rewind)."""
+        for camera, _ in self.cameras:
+            camera.reset()
 
     def close(self):
-        self.follow_camera.close()
+        for camera, _ in self.cameras:
+            camera.close()
 
     def _publish_static_transforms(self):
         # Sim time, like every other message the simulator publishes: the nav stack runs

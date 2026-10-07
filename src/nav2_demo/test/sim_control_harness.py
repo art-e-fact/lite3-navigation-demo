@@ -276,6 +276,8 @@ class SimControlHarness:
 
         self._total_distance_m = 0.0
         self._message_count = 0
+        # (sim time s, x m, y m, yaw rad, speed m/s) per odom message, for reports.
+        self._trace: list[tuple[float, float, float, float, float]] = []
         self._previous_xy: tuple[float, float] | None = None
         self._last_xy: tuple[float, float] | None = None
         self._first_clock_sec: float | None = None
@@ -378,9 +380,14 @@ class SimControlHarness:
     def _odom_callback(self, msg: Odometry) -> None:
         x = float(msg.pose.pose.position.x)
         y = float(msg.pose.pose.position.y)
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        speed = math.hypot(msg.twist.twist.linear.x, msg.twist.twist.linear.y)
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         now = time.monotonic()
         with self._lock:
             self._message_count += 1
+            self._trace.append((stamp, x, y, yaw, speed))
             self._last_xy = (x, y)
             if self._first_odom_wall_time is None:
                 self._first_odom_wall_time = now
@@ -563,6 +570,12 @@ class SimControlHarness:
         """Most recent (x, y) position from odometry, or ``None`` if no messages yet."""
         with self._lock:
             return self._last_xy
+
+    @property
+    def trace(self) -> list[tuple[float, float, float, float, float]]:
+        """Every odom sample so far as (sim time s, x m, y m, yaw rad, speed m/s)."""
+        with self._lock:
+            return list(self._trace)
 
     @property
     def message_count(self) -> int:

@@ -54,4 +54,6 @@ open floor: the Lite3 is 0.56 x 0.30 m and walks at 0.3 m/s. Then
   map, starts the simulator (Newton, the Lite3 with its 2D lidar) with
   `--set robot.start_pose.*` from the route, launches the nav side, and
   asserts on `follow_route()`'s result. The world, the simulator config, the
-  route result and a chase-camera video of the run are written to `results/` (or Artefacts' upload directory).
+  route result, a chase-camera and an overhead video, the odom trace as CSV and
+  three charts (`test/report.py`: path on the map, speed, per-waypoint figures)
+  are written to `results/` (or Artefacts' upload directory).

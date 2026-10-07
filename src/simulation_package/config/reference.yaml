@@ -105,6 +105,15 @@ sensors:
     target_height_m: 0.55
     smoothing: 0.08
     quality: 8
+    follow_yaw: true
+
+  # A second video with the same options, e.g. a top-down view that keeps the map's heading.
+  overhead_camera:
+    enabled: false
+    video_path: ''
+    elevation_deg: -89.0
+    follow_yaw: false
+    distance_m: 10.0
 
 rerun:
   enabled: false

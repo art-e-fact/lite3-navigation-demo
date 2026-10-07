@@ -161,6 +161,9 @@ class FollowCameraConfig:
 	# Vertical field of view. MuJoCo's default free camera uses fovy=45, so both
 	# backends frame the robot identically at the same distance_m.
 	fov_deg: float = 45.0
+	# Turn with the robot (a chase camera) or keep a fixed heading (an overhead camera:
+	# elevation_deg -89, follow_yaw false keeps the map's orientation).
+	follow_yaw: bool = True
 
 
 @dataclass
@@ -170,6 +173,8 @@ class SensorsConfig:
 	mid360: Mid360Config = field(default_factory=Mid360Config)
 	robosense: RobosenseConfig = field(default_factory=RobosenseConfig)
 	follow_camera: FollowCameraConfig = field(default_factory=FollowCameraConfig)
+	# A second video, same options, rendered off its own offscreen viewer.
+	overhead_camera: FollowCameraConfig = field(default_factory=FollowCameraConfig)
 
 
 @dataclass
@@ -334,16 +339,17 @@ class SimulationConfig:
 			errors.append("sensors.robosense.v_fov_deg must have exactly two elements [min, max]")
 		elif sensors.robosense.v_fov_deg[0] >= sensors.robosense.v_fov_deg[1]:
 			errors.append("sensors.robosense.v_fov_deg min must be less than max")
-		if sensors.follow_camera.enabled and not str(sensors.follow_camera.video_path).strip():
-			errors.append("sensors.follow_camera.video_path must be set when follow camera recording is enabled")
-		_validate_positive(errors, "sensors.follow_camera.fps", sensors.follow_camera.fps)
-		_validate_positive(errors, "sensors.follow_camera.width", sensors.follow_camera.width)
-		_validate_positive(errors, "sensors.follow_camera.height", sensors.follow_camera.height)
-		_validate_positive(errors, "sensors.follow_camera.distance_m", sensors.follow_camera.distance_m)
-		_validate_positive(errors, "sensors.follow_camera.target_height_m", sensors.follow_camera.target_height_m)
-		_validate_positive(errors, "sensors.follow_camera.quality", sensors.follow_camera.quality)
-		_validate_positive(errors, "sensors.follow_camera.fov_deg", sensors.follow_camera.fov_deg)
-		_validate_unit_interval(errors, "sensors.follow_camera.smoothing", sensors.follow_camera.smoothing)
+		for name, camera in (("follow_camera", sensors.follow_camera), ("overhead_camera", sensors.overhead_camera)):
+			if camera.enabled and not str(camera.video_path).strip():
+				errors.append(f"sensors.{name}.video_path must be set when camera recording is enabled")
+			_validate_positive(errors, f"sensors.{name}.fps", camera.fps)
+			_validate_positive(errors, f"sensors.{name}.width", camera.width)
+			_validate_positive(errors, f"sensors.{name}.height", camera.height)
+			_validate_positive(errors, f"sensors.{name}.distance_m", camera.distance_m)
+			_validate_positive(errors, f"sensors.{name}.target_height_m", camera.target_height_m)
+			_validate_positive(errors, f"sensors.{name}.quality", camera.quality)
+			_validate_positive(errors, f"sensors.{name}.fov_deg", camera.fov_deg)
+			_validate_unit_interval(errors, f"sensors.{name}.smoothing", camera.smoothing)
 
 		return errors
 
