@@ -1,0 +1,41 @@
+project: artefacts/lite3-navigation-demo
+version: 0.1.0
+
+jobs:
+  test-nav2-route:
+    type: test
+    timeout: 15 # minutes
+    package:
+      docker:
+        build:
+          dockerfile: empty
+    runtime:
+      framework: other
+      simulator: newton
+
+    scenarios:
+      defaults:
+        params:
+          headless: "true"
+      settings:
+        - name: test_route_is_completed
+          run: "pixi run -e nav-test test-nav2-route"
+
+  test-nav2-route-mujoco:
+    type: test
+    timeout: 15 # minutes
+    package:
+      docker:
+        build:
+          dockerfile: empty
+    runtime:
+      framework: other
+      simulator: mujoco
+
+    scenarios:
+      defaults:
+        params:
+          headless: "true"
+      settings:
+        - name: test_route_is_completed
+          run: "pixi run -e nav-test test-nav2-route-mujoco"
