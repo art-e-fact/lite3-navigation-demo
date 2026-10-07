@@ -48,7 +48,13 @@ def test_route_is_completed(tmp_path, headless):
         'scene': world,
         'headless': headless,
         'robot': {'model': 'lite3'},
-        'sensors': {'lidar_2d': {'enabled': True, 'range_max': 12.0}},
+        'sensors': {
+            'lidar_2d': {'enabled': True, 'range_max': 12.0},
+            # A chase-camera video of the run, recorded by the simulator (headless too).
+            # Steeper than the default 18 deg so the 1 m walls do not hide the robot.
+            'follow_camera': {'enabled': True, 'video_path': str(OUTPUT_FOLDER / f'{route.name}.mp4'),
+                              'elevation_deg': -35.0},
+        },
         'rerun': {'enabled': False},
     }
     # Spawn the robot where the route starts: the simulator's config fields,
