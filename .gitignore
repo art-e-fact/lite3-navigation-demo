@@ -13,7 +13,6 @@ __pycache__/
 .pixi/*
 !.pixi/config.toml
 
-MUJOCO_LOG.TXT
 imgui.ini
 
 # test outputs and routes recorded with `artefacts-route record`

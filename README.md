@@ -20,7 +20,7 @@ Tested on Linux (x64); the simulator also runs on macOS (arm64).
 pixi run build
 ```
 
-The simulator (Newton/MuJoCo, ROS 2 Kilted) and the Nav2 side (ROS 2 Jazzy)
+The simulator (Newton, ROS 2 Kilted) and the Nav2 side (ROS 2 Jazzy)
 need different ROS versions, so they are built into separate workspaces under
 `rosbuild/` and run as separate processes. Delete `rosbuild/` for a clean build.
 
@@ -30,7 +30,6 @@ need different ROS versions, so they are built into separate workspaces under
 pixi run test-nav2-route --headless  # Newton, no windows
 pixi run test-nav2-route             # with the Newton viewer
 RVIZ=true pixi run test-nav2-route   # ... and Nav2's RViz view
-pixi run test-nav2-route-mujoco      # the same on MuJoCo
 pixi run test-nav2-route-cpu         # force the CPU Newton build
 ```
 
@@ -55,11 +54,10 @@ RViz opens with the map: **2D Pose Estimate** where the robot should start,
 ```bash
 pixi run -e artefacts artefacts login   # once; set `project` in artefacts.yaml to yours
 pixi run -e artefacts artefacts run test-nav2-route
-pixi run -e artefacts artefacts run test-nav2-route-mujoco
 ```
 
 ## Layout
 
 - `src/nav2_demo`: the launch file, Nav2 parameters, maps, bundled route and the test.
-- `src/simulation_package`: the Lite3 in Newton or MuJoCo with a 2D lidar, publishing to ROS 2.
+- `src/simulation_package`: the Lite3 in Newton with a 2D lidar, publishing to ROS 2.
 - `src/sdk_deploy` (submodule): DeepRobotics' `rl_deploy`, the locomotion controller that turns `/cmd_vel` into joint commands.

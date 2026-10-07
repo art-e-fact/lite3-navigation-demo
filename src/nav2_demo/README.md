@@ -19,7 +19,6 @@ route's map. Uses
 pixi run test-nav2-route --headless  # Newton (GPU if there is one), no windows
 pixi run test-nav2-route             # with the Newton viewer
 RVIZ=true pixi run test-nav2-route   # ... and Nav2's RViz view (map, costmaps, path, robot)
-pixi run test-nav2-route-mujoco      # the same on MuJoCo
 ROUTE=routes/lab.yaml pixi run test-nav2-route   # a particular route
 ```
 

@@ -5,7 +5,7 @@ name = "lite3-navigation-demo"
 platforms = ["linux-64", "osx-arm64", "linux-aarch64"]
 version = "0.1.0"
 
-# The simulator (Newton/MuJoCo, ROS 2 Kilted) and the controller + Nav2 (ROS 2
+# The simulator (Newton, ROS 2 Kilted) and the controller + Nav2 (ROS 2
 # Jazzy) need different ROS versions, so they live in separate pixi
 # environments and are built into separate colcon workspaces under rosbuild/.
 [tasks]
@@ -51,7 +51,7 @@ default-environment = "sim"
 depends-on = ["setup"]
 
 # Newton runs in sim-gpu when scripts/sim_pixi_env.sh detects an NVIDIA GPU, else sim;
-# -cpu forces the CPU Warp build; MuJoCo always runs in sim.
+# -cpu forces the CPU Warp build.
 [tasks.test-nav2-route]
 cmd = "pytest src/nav2_demo/test/test_route.py -vv -s"
 default-environment = "nav-test"
@@ -62,11 +62,6 @@ cmd = "pytest src/nav2_demo/test/test_route.py -vv -s"
 default-environment = "nav-test"
 depends-on = ["build"]
 env = { SIM_PIXI_ENV = "sim" }
-
-[tasks.test-nav2-route-mujoco]
-cmd = "pytest src/nav2_demo/test/test_route.py --simulator mujoco -vv -s"
-default-environment = "nav-test"
-depends-on = ["build"]
 
 # Record a route by clicking in RViz: pixi run record-route --name lab
 [tasks.record-route]
@@ -89,7 +84,7 @@ LDFLAGS = "-L$CONDA_PREFIX/lib"
 
 [feature.sim.dependencies]
 newton-examples = ">=1.5.1,<2"
-mujoco = ">=3.8.1,<4"
+mujoco = ">=3.8.1,<4"  # Newton's SolverMuJoCo and the procedural scene builders
 trimesh = ">=4.12.2,<5"
 imageio = ">=2.37.0,<3"
 imageio-ffmpeg = ">=0.6.0,<0.7"
@@ -125,7 +120,6 @@ warp-lang = { version = ">=1.17.0,<2", build = "cuda*" }
 
 # The simulator's recorder imports rerun at module level, so it ships with sim.
 [feature.rerun.pypi-dependencies]
-rerun-loader-mjcf = ">=1.0.1, <2"
 rerun-sdk = { version = ">=0.37.0, <0.38", extras = ["catalog"] }
 
 [feature.nav]

@@ -3,11 +3,11 @@ route's map, and check that the robot got round.
 
     pixi run test-nav2-route            # or: pixi run -e nav-test pytest src/nav2_demo/test -s
 
-The simulator (Newton by default) runs in its own pixi environment with the
+The simulator (Newton) runs in its own pixi environment with the
 robot spawned at the route's start; Nav2 and rl_deploy run from this
 environment via nav2_route.launch.py; the test itself drives the route with
-artefacts_toolkit_navigation.follow_route(). Params, also settable from
-Artefacts scenarios: headless, simulator. Environment: ROUTE picks a route file
+artefacts_toolkit_navigation.follow_route(). Param, also settable from
+Artefacts scenarios: headless. Environment: ROUTE picks a route file
 (default: the route recorded last, else the bundled depot route); RVIZ=true
 opens Nav2's RViz view alongside (the simulator's own viewer follows headless).
 """
@@ -35,7 +35,7 @@ ROUTE_TIMEOUT_SEC = 300.0
 NAV2_STARTUP_TIMEOUT_SEC = 180.0
 
 
-def test_route_is_completed(tmp_path, simulator, headless):
+def test_route_is_completed(tmp_path, headless):
     OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
     route = load_route(ROUTE)
 
@@ -44,7 +44,7 @@ def test_route_is_completed(tmp_path, simulator, headless):
                          format='mjcf')
 
     sim_config = {
-        'simulator': simulator,
+        'simulator': 'newton',
         'scene': world,
         'headless': headless,
         'robot': {'model': 'lite3'},
@@ -60,7 +60,7 @@ def test_route_is_completed(tmp_path, simulator, headless):
 
     with SimControlHarness(
         sim_config,
-        config_path=OUTPUT_FOLDER / f'{route.name}_{simulator}_sim.yaml',
+        config_path=OUTPUT_FOLDER / f'{route.name}_sim.yaml',
         log_dir=tmp_path,
         repo_root=REPO_ROOT,
         sim_package_root=SIM_PACKAGE_ROOT,
@@ -72,7 +72,7 @@ def test_route_is_completed(tmp_path, simulator, headless):
     ) as harness:
         result = follow_route(
             route, timeout_s=ROUTE_TIMEOUT_SEC, startup_timeout_s=NAV2_STARTUP_TIMEOUT_SEC,
-            label=f'{route.name}_{simulator}', results_dir=str(OUTPUT_FOLDER))
+            label=route.name, results_dir=str(OUTPUT_FOLDER))
         reason = harness.stop_reason
 
     if reason is StopReason.SIM_EXITED:

@@ -3,7 +3,7 @@
 
 simulator: newton
 
-# Scene XML/MJCF for the environment, or a MuJoCo procedural scene URI
+# Scene XML/MJCF for the environment, or a procedural scene URI
 # such as procedural://blocks or procedural://railroad.
 scene: package://lite3_sdk_deploy/Lite3_description/lite3_mjcf/mjcf/stairs_floors.xml
 

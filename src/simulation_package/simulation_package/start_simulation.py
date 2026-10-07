@@ -26,13 +26,6 @@ def _load_newton_runner():
     return module.run_newton
 
 
-def _load_mujoco_runner():
-    module_path = CURRENT_DIR / "mujoco_simulation_ros2.py"
-    spec = importlib.util.spec_from_file_location("lite3_mujoco_simulation_ros2", module_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.run_mujoco
-
 def _parse_args():
     import argparse
 
@@ -72,8 +65,6 @@ def main():
 
     if config.simulator.lower() == "newton":
         _load_newton_runner()(config, ros_args)
-    elif config.simulator.lower() == "mujoco":
-        _load_mujoco_runner()(config, ros_args)
     else:
         raise SystemExit(f"Unsupported simulator: {config.simulator}")
 

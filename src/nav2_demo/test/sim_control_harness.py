@@ -6,7 +6,6 @@ import math
 import os
 import signal
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -310,8 +309,7 @@ class SimControlHarness:
         sim_pythonpath = os.pathsep.join(
             p for p in [str(self._sim_package_root), os.environ.get('PYTHONPATH', '')] if p
         )
-        is_mujoco = self._sim_config.get('simulator') == 'mujoco'
-        sim_python = 'mjpython' if (is_mujoco and sys.platform == 'darwin') else 'python'
+        sim_python = 'python'
         self._context = rclpy.context.Context()
         rclpy.init(context=self._context)
         self._node = rclpy.create_node('sim_control_harness', context=self._context)

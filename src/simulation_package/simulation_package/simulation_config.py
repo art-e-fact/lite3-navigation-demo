@@ -276,8 +276,8 @@ class SimulationConfig:
 	def validate(self) -> list[str]:
 		errors: list[str] = []
 		simulator = self.simulator.lower()
-		if simulator not in {"newton", "mujoco"}:
-			errors.append("simulator must be 'newton' or 'mujoco'")
+		if simulator != "newton":
+			errors.append("simulator must be 'newton'")
 
 		try:
 			self.robot.preset()

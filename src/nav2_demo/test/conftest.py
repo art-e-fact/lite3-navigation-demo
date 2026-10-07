@@ -24,10 +24,6 @@ def pytest_addoption(parser):
         '--headless', action='store_true', default=False,
         help='Run the simulator without a viewer',
     )
-    parser.addoption(
-        '--simulator', action='store', default='newton', choices=['newton', 'mujoco'],
-        help='Simulator backend (newton or mujoco)',
-    )
 
 
 @pytest.fixture(scope='session')
@@ -36,7 +32,3 @@ def headless(request):
         return True
     return _parse_bool(artefacts_params().get('headless', 'false'))
 
-
-@pytest.fixture(scope='session')
-def simulator(request):
-    return str(artefacts_params().get('simulator') or request.config.getoption('--simulator')).strip().lower()
