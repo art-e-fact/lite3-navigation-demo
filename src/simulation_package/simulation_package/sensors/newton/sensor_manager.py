@@ -5,43 +5,22 @@ from dataclasses import dataclass, field
 from tf2_ros import StaticTransformBroadcaster
 
 from sensors.common.transforms import sim_time_stamp
-from simulation_config import FollowCameraConfig, Lidar2DConfig, Mid360Config, RealsenseConfig, RobosenseConfig
+from simulation_config import FollowCameraConfig, Lidar2DConfig
 from sensors.newton.bvh import NewtonBvh
-from sensors.newton.depth_sensor import NewtonDepthSensor
 from sensors.newton.follow_camera_recorder import NewtonFollowCameraRecorder
 from sensors.newton.lidar_sensor import NewtonLidarSensor
-from sensors.newton.mid360_lidar_sensor import NewtonMid360LidarSensor
-from sensors.newton.robosense_lidar_sensor import NewtonRobosenseLidarSuite
+from utils import step_interval
 
 
 @dataclass
 class NewtonSensorOptions:
     lidar_2d: Lidar2DConfig = field(default_factory=Lidar2DConfig)
-    mid360: Mid360Config = field(default_factory=Mid360Config)
-    realsense: RealsenseConfig = field(default_factory=RealsenseConfig)
-    robosense: RobosenseConfig = field(default_factory=RobosenseConfig)
     follow_camera: FollowCameraConfig = field(default_factory=FollowCameraConfig)
     overhead_camera: FollowCameraConfig = field(default_factory=FollowCameraConfig)
 
     @property
     def enable_lidar(self) -> bool:
         return self.lidar_2d.enabled
-
-    @property
-    def enable_mid360(self) -> bool:
-        return self.mid360.enabled
-
-    @property
-    def enable_robosense(self) -> bool:
-        return self.robosense.enabled
-
-    @property
-    def enable_depth(self) -> bool:
-        return self.realsense.enable_depth
-
-    @property
-    def enable_color(self) -> bool:
-        return self.realsense.enable_color
 
     @property
     def enable_follow_camera(self) -> bool:
@@ -70,18 +49,7 @@ class NewtonSensorManager:
         self.static_tf_broadcaster = StaticTransformBroadcaster(node)
 
         self.lidar = NewtonLidarSensor(model, node, config=options.lidar_2d)
-        self.mid360 = NewtonMid360LidarSensor(
-            model,
-            node,
-            config=options.mid360,
-        )
-        self.depth = NewtonDepthSensor(
-            model,
-            node,
-            config=options.realsense,
-        )
-        self.robosense = NewtonRobosenseLidarSuite(model, node, dt, config=options.robosense)
-        # The follow camera raytraces the same BVH as the lidars, so it belongs in the
+        # The follow camera raytraces the same BVH as the lidar, so it belongs in the
         # same due-list rather than owning a second refit.
         self.follow_camera = NewtonFollowCameraRecorder(
             model,
@@ -102,13 +70,12 @@ class NewtonSensorManager:
             bvh=None,
         )
         self.cameras = [
-            (self.follow_camera, max(1, int(round(1.0 / (options.follow_camera.fps * dt))))),
-            (self.overhead_camera, max(1, int(round(1.0 / (options.overhead_camera.fps * dt))))),
+            (self.follow_camera, step_interval(options.follow_camera.fps, dt)),
+            (self.overhead_camera, step_interval(options.overhead_camera.fps, dt)),
         ]
 
+        # Truncated, unlike step_interval(): kept so the sensor rates stay bit-identical.
         self.lidar_step_interval = max(1, int(1.0 / (options.lidar_2d.frequency_hz * dt)))
-        self.mid360_step_interval = max(1, int(1.0 / (options.mid360.frequency_hz * dt)))
-        self.depth_step_interval = max(1, int(1.0 / (options.realsense.frequency_hz * dt)))
         self.bvh = NewtonBvh(model, state) if self.enabled else None
         for camera, _ in self.cameras:
             camera.bvh = self.bvh
@@ -118,9 +85,6 @@ class NewtonSensorManager:
     def enabled(self) -> bool:
         return (
             self.lidar.enabled
-            or self.mid360.enabled
-            or self.depth.enabled
-            or self.robosense.enabled
             or any(camera.enabled for camera, _ in self.cameras)
         )
 
@@ -129,24 +93,15 @@ class NewtonSensorManager:
             return
 
         due_lidar = self.lidar.enabled and step_count % self.lidar_step_interval == 0
-        due_mid360 = self.mid360.enabled and step_count % self.mid360_step_interval == 0
-        due_depth = self.depth.enabled and step_count % self.depth_step_interval == 0
-        due_robosense = self.robosense.any_due(step_count)
         due_cameras = [camera for camera, interval in self.cameras
                        if camera.enabled and step_count % interval == 0]
-        if not (due_lidar or due_mid360 or due_depth or due_robosense or due_cameras):
+        if not (due_lidar or due_cameras):
             return
 
         # Refit once for all due sensors; sensor rendering then sees the same world pose.
         self.bvh.refit(state)
         if due_lidar:
             self.lidar.update(state, timestamp)
-        if due_mid360:
-            self.mid360.update(state, timestamp)
-        if due_depth:
-            self.depth.update(state, timestamp)
-        if due_robosense:
-            self.robosense.update(state, step_count, timestamp)
         for camera in due_cameras:
             camera.update(state, refit=False, timestamp=timestamp)
 
@@ -162,12 +117,6 @@ class NewtonSensorManager:
         self.bvh.refit(state)
         if self.lidar.enabled:
             self.lidar.update(state, timestamp)
-        if self.mid360.enabled:
-            self.mid360.update(state, timestamp)
-        if self.depth.enabled:
-            self.depth.update(state, timestamp)
-        if self.robosense.enabled:
-            self.robosense.warmup(state, timestamp)
         for camera, _ in self.cameras:
             if camera.enabled:
                 camera.render(state, refit=False, timestamp=timestamp)
@@ -187,8 +136,5 @@ class NewtonSensorManager:
         stamp = sim_time_stamp(0.0)
         transforms = []
         transforms.extend(self.lidar.get_static_transforms(stamp))
-        transforms.extend(self.mid360.get_static_transforms(stamp))
-        transforms.extend(self.depth.get_static_transforms(stamp))
-        transforms.extend(self.robosense.get_static_transforms(stamp))
         if transforms:
             self.static_tf_broadcaster.sendTransform(transforms)

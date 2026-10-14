@@ -34,6 +34,13 @@ RVIZ = os.environ.get('RVIZ', 'false').lower() in ('1', 'true', 'yes')
 
 ROUTE_TIMEOUT_SEC = 300.0
 NAV2_STARTUP_TIMEOUT_SEC = 180.0
+HARNESS_MARGIN_SEC = 120.0  # slack on top of startup + route time before the harness gives up
+LIDAR_RANGE_M = 12.0
+FOLLOW_ELEVATION_DEG = -35.0
+OVERHEAD_ELEVATION_DEG = -89.0  # not -90: looking straight down leaves the camera up vector undefined
+OVERHEAD_DISTANCE_M = 10.0
+OVERHEAD_SMOOTHING = 0.03  # per-frame blend towards the robot (0..1); low keeps the top-down view steady
+MAX_FINAL_ERROR_M = 0.5  # how close to the last waypoint counts as arrived
 
 
 def test_route_is_completed(tmp_path, headless):
@@ -50,15 +57,15 @@ def test_route_is_completed(tmp_path, headless):
         'headless': headless,
         'robot': {'model': 'lite3'},
         'sensors': {
-            'lidar_2d': {'enabled': True, 'range_max': 12.0},
+            'lidar_2d': {'enabled': True, 'range_max': LIDAR_RANGE_M},
             # Two videos of the run, recorded by the simulator (headless too): a chase
             # camera, steeper than the default 18 deg so the 1 m walls do not hide the
             # robot, and a top-down view that keeps the map's heading.
             'follow_camera': {'enabled': True, 'video_path': str(OUTPUT_FOLDER / f'{route.name}_follow.mp4'),
-                              'elevation_deg': -35.0},
+                              'elevation_deg': FOLLOW_ELEVATION_DEG},
             'overhead_camera': {'enabled': True, 'video_path': str(OUTPUT_FOLDER / f'{route.name}_overhead.mp4'),
-                                'elevation_deg': -89.0, 'follow_yaw': False, 'distance_m': 10.0,
-                                'smoothing': 0.03},
+                                'elevation_deg': OVERHEAD_ELEVATION_DEG, 'follow_yaw': False, 'distance_m': OVERHEAD_DISTANCE_M,
+                                'smoothing': OVERHEAD_SMOOTHING},
         },
         'rerun': {'enabled': False},
     }
@@ -79,19 +86,20 @@ def test_route_is_completed(tmp_path, headless):
         control_launch_file='nav2_route.launch.py',
         control_launch_args={'use_rviz': str(RVIZ).lower(), **({'route': str(ROUTE)} if ROUTE else {})},
         sim_extra_args=sim_extra_args,
-        max_runtime_sec=NAV2_STARTUP_TIMEOUT_SEC + ROUTE_TIMEOUT_SEC + 120.0,
+        max_runtime_sec=NAV2_STARTUP_TIMEOUT_SEC + ROUTE_TIMEOUT_SEC + HARNESS_MARGIN_SEC,
     ) as harness:
         result = follow_route(
             route, timeout_s=ROUTE_TIMEOUT_SEC, startup_timeout_s=NAV2_STARTUP_TIMEOUT_SEC,
             label=route.name, results_dir=str(OUTPUT_FOLDER))
         reason = harness.stop_reason
         trace = harness.trace
+        plans = harness.plans
 
     # The run's data, pass or fail: the odom trace as CSV and the charts.
     waypoint_chart(result, OUTPUT_FOLDER / f'{route.name}_waypoints.html')
     if trace:
         write_trace_csv(trace, OUTPUT_FOLDER / f'{route.name}_odom.csv')
-        path_chart(REPO_ROOT / route.map.file, route, trace, OUTPUT_FOLDER / f'{route.name}_path.html')
+        path_chart(REPO_ROOT / route.map.file, route, trace, OUTPUT_FOLDER / f'{route.name}_path.html', plans)
         speed_chart(trace, route, OUTPUT_FOLDER / f'{route.name}_speed.html')
 
     if reason is StopReason.SIM_EXITED:
@@ -101,5 +109,5 @@ def test_route_is_completed(tmp_path, headless):
 
     assert result.succeeded, (
         f'{result.outcome}: {result.error}\n--- nav log ---\n{harness.control_log_tail(40)}')
-    assert result.final_pos_error_m is not None and result.final_pos_error_m < 0.5, (
+    assert result.final_pos_error_m is not None and result.final_pos_error_m < MAX_FINAL_ERROR_M, (
         f'ended {result.final_pos_error_m:.2f} m from the last waypoint')

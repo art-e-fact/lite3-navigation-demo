@@ -1,18 +1,31 @@
 import numpy as np
 import rclpy
-from builtin_interfaces.msg import Time
 from drdds.msg import ImuData, ImuDataValue, JointData, JointsData, JointsDataCmd, JointsDataValue, MetaType
-from geometry_msgs.msg import Pose, PoseArray, Quaternion, TransformStamped
 from sensor_msgs.msg import Imu
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from rosgraph_msgs.msg import Clock
 from tf2_ros import TransformBroadcaster
 
-from simulation import DEFAULT_DAMPING, DEFAULT_STIFFNESS, ROBOT_PROFILES, JointCommand, RobotProfile, quat_xyzw_to_rpy
+from constants import BASE_FRAME, ODOM_FRAME
+from sensors.common.transforms import make_transform, quaternion_msg, sim_time_stamp
+from simulation import ROBOT_PROFILES, JointCommand, RobotProfile, default_joint_command_arrays, quat_xyzw_to_rpy
 
-WAYPOINT_REPUBLISH_PERIOD_SEC = 1.0
+# drdds JointsData/JointsDataCmd carry a fixed 16 slots (the M20); the Lite3 fills 12.
+JOINT_MSG_SLOTS = 16
+# Joint name field: four ASCII spaces, i.e. a blank 4-character name.
+BLANK_JOINT_NAME = [32, 32, 32, 32]
+# drdds status_word the sim reports in every joint slot.
+JOINT_STATUS_WORD = 1
+# Motor and driver temperatures [deg C] the sim reports: fixed placeholders.
+SIM_MOTOR_TEMP_C = 40.0
+SIM_DRIVER_TEMP_C = 45.0
+# Publisher/subscriber queue depths; IMU and joints publish every state step, so get the deepest.
+IMU_QUEUE_DEPTH = 200
+JOINTS_QUEUE_DEPTH = 200
+ODOM_QUEUE_DEPTH = 50
+CLOCK_QUEUE_DEPTH = 10
+JOINTS_CMD_QUEUE_DEPTH = 10
 
 
 class NewtonRosBridge:
@@ -24,34 +37,16 @@ class NewtonRosBridge:
 
         self.profile = profile if profile is not None else ROBOT_PROFILES["Lite3"]
         self.num_dofs = self.profile.num_dofs
-        self.kp_cmd = np.full(self.num_dofs, DEFAULT_STIFFNESS, dtype=np.float32)
-        self.kd_cmd = np.full(self.num_dofs, DEFAULT_DAMPING, dtype=np.float32)
-        self.pos_cmd = self.profile.default_joint_pos.copy()
-        self.vel_cmd = np.zeros(self.num_dofs, dtype=np.float32)
-        self.tau_ff = np.zeros(self.num_dofs, dtype=np.float32)
+        self.kp_cmd, self.kd_cmd, self.pos_cmd, self.vel_cmd, self.tau_ff = default_joint_command_arrays(self.profile)
 
-        self.imu_pub = self.node.create_publisher(ImuData, "/IMU_DATA", 200)
-        self.imu_std_pub = self.node.create_publisher(Imu, "/IMU_SIM", 200) # adding "_SIM" to avoid publishing to the same topic in real robot
-        self.joints_pub = self.node.create_publisher(JointsData, "/JOINTS_DATA", 200)
-        self.odom_pub = self.node.create_publisher(Odometry, "/odom", 50)
+        self.imu_pub = self.node.create_publisher(ImuData, "/IMU_DATA", IMU_QUEUE_DEPTH)
+        self.imu_std_pub = self.node.create_publisher(Imu, "/IMU_SIM", IMU_QUEUE_DEPTH) # adding "_SIM" to avoid publishing to the same topic in real robot
+        self.joints_pub = self.node.create_publisher(JointsData, "/JOINTS_DATA", JOINTS_QUEUE_DEPTH)
+        self.odom_pub = self.node.create_publisher(Odometry, "/odom", ODOM_QUEUE_DEPTH)
         # The navigation stack runs with use_sim_time, so /clock is the only time source.
-        self.clock_pub = self.node.create_publisher(Clock, "/clock", 10)
+        self.clock_pub = self.node.create_publisher(Clock, "/clock", CLOCK_QUEUE_DEPTH)
         self.tf_broadcaster = TransformBroadcaster(self.node)
-        self.cmd_sub = self.node.create_subscription(JointsDataCmd, "/JOINTS_CMD", self._cmd_callback, 10)
-
-        # Latched so a navigation node started after the simulator still gets the mission.
-        waypoint_qos = QoSProfile(
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-        )
-        self.waypoint_pub = self.node.create_publisher(PoseArray, "/procedural_waypoints", waypoint_qos)
-        self.procedural_waypoints_msg: PoseArray | None = None
-        self.waypoint_timer = None
-        self.scene_meta: dict = {}
-        self._sim_time = 0.0
-        self.first_command_time: float | None = None # Sim time of first /JOINTS_CMD
+        self.cmd_sub = self.node.create_subscription(JointsDataCmd, "/JOINTS_CMD", self._cmd_callback, JOINTS_CMD_QUEUE_DEPTH)
 
     def get_logger(self):
         return self.node.get_logger()
@@ -76,56 +71,12 @@ class NewtonRosBridge:
 
     def publish_clock(self, timestamp: float):
         """Publish simulated time. Called every step"""
-        self._sim_time = float(timestamp)
         msg = Clock()
-        msg.clock = self._stamp(timestamp)
+        msg.clock = sim_time_stamp(timestamp)
         self.clock_pub.publish(msg)
 
-    def set_scene_meta(self, scene_meta: dict | None):
-        """Publish the procedural mission described by *scene_meta* on /procedural_waypoints."""
-        self.scene_meta = scene_meta or {}
-        self.procedural_waypoints_msg = self._build_waypoint_pose_array(self.scene_meta)
-        if self.procedural_waypoints_msg is None:
-            return
-        self.node.get_logger().info(
-            f"Publishing mission with {len(self.procedural_waypoints_msg.poses)} "
-            "ordered waypoints on /procedural_waypoints"
-        )
-        self._publish_procedural_waypoints()
-        if self.waypoint_timer is None:
-            self.waypoint_timer = self.node.create_timer(
-                WAYPOINT_REPUBLISH_PERIOD_SEC, self._publish_procedural_waypoints
-            )
-
-    @staticmethod
-    def _build_waypoint_pose_array(scene_meta: dict) -> PoseArray | None:
-        mission_xy = scene_meta.get("mission_xy", [])
-        if not mission_xy:
-            return None
-
-        msg = PoseArray()
-        msg.header.frame_id = "odom"
-        msg.poses = []
-        for xy in mission_xy:
-            if len(xy) != 2:
-                continue
-            pose = Pose()
-            pose.position.x = float(xy[0])
-            pose.position.y = float(xy[1])
-            pose.position.z = 0.0
-            pose.orientation.w = 1.0
-            msg.poses.append(pose)
-        return msg if msg.poses else None
-
-    def _publish_procedural_waypoints(self):
-        if self.procedural_waypoints_msg is None:
-            return
-        self.procedural_waypoints_msg.header.stamp = self._stamp(self._sim_time)
-        self.waypoint_pub.publish(self.procedural_waypoints_msg)
-
     def publish_state(self, timestamp: float, state, last_tau: np.ndarray):
-        self._sim_time = float(timestamp)
-        stamp = self._stamp(timestamp)
+        stamp = sim_time_stamp(timestamp)
         rpy_deg = np.degrees(quat_xyzw_to_rpy(state.quat_xyzw))
 
         imu_msg = ImuData()
@@ -148,10 +99,7 @@ class NewtonRosBridge:
         imu_std_msg.header.frame_id = '' # matches with /IMU from real M20
         imu_std_msg.header.stamp = stamp # use this for sim only
         # imu_std_msg.header.stamp = self.node.get_clock().now().to_msg() # use this for HIL -> TODO: somehow difference between timestamps of lidar vs imu topics causes drifting in localization by on-board SLAM binaries
-        imu_std_msg.orientation = Quaternion(
-            x=float(state.quat_xyzw[0]), y=float(state.quat_xyzw[1]),
-            z=float(state.quat_xyzw[2]), w=float(state.quat_xyzw[3])
-        )
+        imu_std_msg.orientation = quaternion_msg(state.quat_xyzw)
         imu_std_msg.angular_velocity.x = float(state.imu_gyro[0])
         imu_std_msg.angular_velocity.y = float(state.imu_gyro[1])
         imu_std_msg.angular_velocity.z = float(state.imu_gyro[2])
@@ -165,45 +113,33 @@ class NewtonRosBridge:
         joints_msg.header.frame_id = 0
         joints_msg.header.stamp = stamp
         joints_msg.data = JointsDataValue()
-        joints_msg.data.joints_data = [JointData() for _ in range(16)]
+        joints_msg.data.joints_data = [JointData() for _ in range(JOINT_MSG_SLOTS)]
         pub_pos, pub_vel, pub_tau = self._raw_to_pub(state.joint_position, state.joint_velocity, last_tau)
         for index in range(self.num_dofs):
             joint = joints_msg.data.joints_data[index]
-            joint.name = [32, 32, 32, 32]
+            joint.name = list(BLANK_JOINT_NAME)
             joint.data_id = 0
-            joint.status_word = 1
+            joint.status_word = JOINT_STATUS_WORD
             joint.position = float(pub_pos[index])
             joint.velocity = float(pub_vel[index])
             joint.torque = float(pub_tau[index])
-            joint.motion_temp = 40.0
-            joint.driver_temp = 45.0
-        for index in range(self.num_dofs, 16):
-            joints_msg.data.joints_data[index].status_word = 1
+            joint.motion_temp = SIM_MOTOR_TEMP_C
+            joint.driver_temp = SIM_DRIVER_TEMP_C
+        for index in range(self.num_dofs, JOINT_MSG_SLOTS):
+            joints_msg.data.joints_data[index].status_word = JOINT_STATUS_WORD
         self.joints_pub.publish(joints_msg)
 
     def publish_odom_and_tf(self, timestamp: float, state):
-        stamp = self._stamp(timestamp)
+        stamp = sim_time_stamp(timestamp)
         linvel_body = state.linvel_body
 
-        transform = TransformStamped()
-        transform.header.stamp = stamp
-        transform.header.frame_id = "odom"
-        transform.child_frame_id = "base_link"
-        transform.transform.translation.x = float(state.position[0])
-        transform.transform.translation.y = float(state.position[1])
-        transform.transform.translation.z = float(state.position[2])
-        transform.transform.rotation = Quaternion(
-            x=float(state.quat_xyzw[0]),
-            y=float(state.quat_xyzw[1]),
-            z=float(state.quat_xyzw[2]),
-            w=float(state.quat_xyzw[3]),
-        )
+        transform = make_transform(stamp, ODOM_FRAME, BASE_FRAME, state.position, state.quat_xyzw)
         self.tf_broadcaster.sendTransform(transform)
 
         odom_msg = Odometry()
         odom_msg.header.stamp = stamp
-        odom_msg.header.frame_id = "odom"
-        odom_msg.child_frame_id = "base_link"
+        odom_msg.header.frame_id = ODOM_FRAME
+        odom_msg.child_frame_id = BASE_FRAME
         odom_msg.pose.pose.position.x = float(state.position[0])
         odom_msg.pose.pose.position.y = float(state.position[1])
         odom_msg.pose.pose.position.z = float(state.position[2])
@@ -217,16 +153,9 @@ class NewtonRosBridge:
         self.odom_pub.publish(odom_msg)
 
     def _cmd_callback(self, msg: JointsDataCmd):
-        if len(msg.data.joints_data) not in (self.num_dofs, 16):
+        if len(msg.data.joints_data) not in (self.num_dofs, JOINT_MSG_SLOTS):
             self.node.get_logger().warn("Received JointsDataCmd with incorrect number of joints")
             return
-
-        if self.first_command_time is None:
-            self.first_command_time = self._sim_time
-            self.node.get_logger().info(
-                f"First /JOINTS_CMD received at sim_time={self._sim_time:.3f}s; "
-                "starting follow-target wait clock"
-            )
 
         pub_pos = np.zeros(self.num_dofs, dtype=np.float32)
         pub_vel = np.zeros(self.num_dofs, dtype=np.float32)
@@ -245,16 +174,8 @@ class NewtonRosBridge:
             self.pos_cmd[:] = pub_pos
             self.vel_cmd[:] = pub_vel
 
-    def _raw_to_pub(self, q: np.ndarray, dq: np.ndarray, tau: np.ndarray):
+    def _raw_to_pub(self, position: np.ndarray, velocity: np.ndarray, torque: np.ndarray):
         if self.profile.joint_dir is None:
-            return q, dq, tau
+            return position, velocity, torque
         direction = self.profile.joint_dir
-        return (q - self.profile.pos_offset_rad) * direction, dq * direction, tau * direction
-
-    @staticmethod
-    def _stamp(timestamp: float) -> Time:
-        stamp = Time()
-        sec = int(timestamp)
-        stamp.sec = sec
-        stamp.nanosec = int((timestamp - sec) * 1e9)
-        return stamp
+        return (position - self.profile.pos_offset_rad) * direction, velocity * direction, torque * direction

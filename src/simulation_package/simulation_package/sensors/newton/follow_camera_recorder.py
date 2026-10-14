@@ -43,12 +43,16 @@ import warp as wp
 
 from sensors.newton.geometry import camera_transforms
 from simulation_config import FollowCameraConfig
+from utils import log
 
 WORLD_UP = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+# libx264 macro block edge [px]: frames are cropped to a multiple of it (800x600 is not
+# a multiple of 16, so 8 rather than imageio's default 16).
+VIDEO_MACRO_BLOCK_PX = 8
 
 
 def _yaw_from_quat_xyzw(quat_xyzw) -> float:
-    x, y, z, w = (float(v) for v in quat_xyzw)
+    x, y, z, w = (float(component) for component in quat_xyzw)
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
@@ -129,7 +133,7 @@ class NewtonFollowCameraRecorder:
         if self.viewer is not None:
             # The mp4 takes the viewer's window size; width/height size the raytracer.
             width, height = self.viewer.renderer.window.get_framebuffer_size()
-            width, height = width - width % 8, height - height % 8  # see render()
+            width, height = width - width % VIDEO_MACRO_BLOCK_PX, height - height % VIDEO_MACRO_BLOCK_PX  # see render()
             source = "Newton viewer (EGL)" if self._owns_viewer else "Newton viewer"
         else:
             self.sensor = SensorTiledCamera(model, load_textures=False)
@@ -152,7 +156,7 @@ class NewtonFollowCameraRecorder:
             fps=self.fps,
             codec="libx264",
             quality=self.config.quality,
-            macro_block_size=8,  # 800x600 is not a multiple of 16
+            macro_block_size=VIDEO_MACRO_BLOCK_PX,
         )
         self.closed = False
         self._log_info(
@@ -176,8 +180,11 @@ class NewtonFollowCameraRecorder:
             self.viewer.end_frame()
             frame = self.viewer.get_frame().numpy()
             # Crop to the writer's macro block so odd window sizes are not resampled.
-            h, w = frame.shape[:2]
-            return np.ascontiguousarray(frame[: h - h % 8, : w - w % 8])
+            frame_height, frame_width = frame.shape[:2]
+            return np.ascontiguousarray(frame[
+                : frame_height - frame_height % VIDEO_MACRO_BLOCK_PX,
+                : frame_width - frame_width % VIDEO_MACRO_BLOCK_PX,
+            ])
 
         if refit and self.bvh is not None:
             self.bvh.refit(state)
@@ -203,14 +210,14 @@ class NewtonFollowCameraRecorder:
         if frame.shape[:2] != self.frame_size:
             # The viewer's framebuffer resized mid-run (e.g. a macOS Retina scale change);
             # resample back to the size the writer was opened with instead of crashing.
-            h, w = self.frame_size
+            locked_height, locked_width = self.frame_size
             if not self._resize_warned:
                 self._resize_warned = True
                 self._log_info(
                     f"Newton follow camera frame size changed to "
-                    f"{frame.shape[1]}x{frame.shape[0]}; resampling to {w}x{h}"
+                    f"{frame.shape[1]}x{frame.shape[0]}; resampling to {locked_width}x{locked_height}"
                 )
-            frame = np.asarray(Image.fromarray(frame).resize((w, h), Image.BILINEAR))
+            frame = np.asarray(Image.fromarray(frame).resize((locked_width, locked_height), Image.BILINEAR))
         self.writer.append_data(frame)
         self.frame_count += 1
 
@@ -259,10 +266,7 @@ class NewtonFollowCameraRecorder:
     # -- logging ------------------------------------------------------------
 
     def _log_info(self, message: str) -> None:
-        if self.logger is not None:
-            self.logger.info(f"[INFO] {message}")
-        else:
-            print(f"[INFO] {message}")
+        log(self.logger, "info", message)
 
 
 def _create_headless_viewer(model, width: int, height: int, logger):
@@ -277,11 +281,7 @@ def _create_headless_viewer(model, width: int, height: int, logger):
         viewer.set_model(model)
         return viewer
     except Exception as exc:  # no EGL/GL at all: fall back to the raytracer
-        message = f"[WARN] No headless GL viewer for the follow camera, raytracing instead: {exc}"
-        if logger is not None:
-            logger.warn(message)
-        else:
-            print(message)
+        log(logger, "warn", f"No headless GL viewer for the follow camera, raytracing instead: {exc}")
         return None
 
 

@@ -5,6 +5,7 @@ from setuptools import find_packages, setup
 
 package_name = 'simulation_package'
 package_root = Path(__file__).parent.resolve()
+share_dir = 'share/' + package_name
 
 
 def _data_files(source_dir: str, install_dir: str) -> list[tuple[str, list[str]]]:
@@ -25,14 +26,11 @@ setup(
     name=package_name,
     version='0.0.0',
     packages=find_packages(exclude=['test']),
-    package_data={
-        'simulation_package.sensors': ['*.npy'],
-    },
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
-    ] + _data_files('launch', 'share/' + package_name + '/launch') + _data_files('assets', 'share/' + package_name + '/assets') + _data_files('config', 'share/' + package_name + '/config'),
+        (share_dir, ['package.xml']),
+    ] + _data_files('launch', share_dir + '/launch') + _data_files('assets', share_dir + '/assets') + _data_files('config', share_dir + '/config'),
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='azazdeaz',
@@ -46,10 +44,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'simulation_node = simulation_package.simulation_node:main',
             'start_simulation = simulation_package.start_simulation:main',
             'newton_simulation_ros2 = simulation_package.newton_backend.newton_simulation_ros2:main',
-            'auto_waypoint_navigator = simulation_package.auto_waypoint_navigator:main',
         ],
     },
 )

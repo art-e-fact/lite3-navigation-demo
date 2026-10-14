@@ -6,6 +6,9 @@ import numpy as np
 import warp as wp
 from scipy.spatial.transform import Rotation as R_scipy
 
+from constants import BASE_FRAME
+from sensors.common.transforms import make_transform, quat_from_matrix
+
 try:
     from newton._src.utils.selection import match_labels
 except Exception:  # Newton's helper location is stable in 1.2, but keep imports soft.
@@ -34,41 +37,13 @@ def find_site_index(model, label: str) -> int:
     return _find_label_index(labels, label, "site")
 
 
-def robot_shape_mask(model, site_index: int) -> np.ndarray:
-    """Shapes belonging to the same articulation as the shape at *site_index*.
-    Stops the Lidar from reporting itself (the robot)
-    """
-    labels = [_label_text(value) for value in model.shape_label]
-    prefix = labels[site_index].split("/")[0] + "/"
-    mask = np.array([label.startswith(prefix) for label in labels], dtype=bool)
-    shape_body = model.shape_body.numpy()
-    return mask | (shape_body == shape_body[site_index])
-
-
-def filter_self_hits(self_shape: np.ndarray, shape_indices: np.ndarray) -> np.ndarray:
-    """Per-ray mask that is False for a miss or a hit on the sensor's own robot."""
-    hit = shape_indices < len(self_shape)
-    keep = np.zeros(shape_indices.shape, dtype=bool)
-    keep[hit] = ~self_shape[shape_indices[hit].astype(np.int64)]
-    return keep
-
-
 def find_builder_shape_index(builder, label: str) -> int:
     return _find_label_index(builder.shape_label, label, "shape")
-
-
-def find_builder_body_index(builder, label: str) -> int:
-    return _find_label_index(builder.body_label, label, "body")
 
 
 def transform_expand(transform_value) -> tuple[np.ndarray, np.ndarray]:
     values = np.asarray(transform_value, dtype=np.float64)
     return values[:3].copy(), values[3:7].copy()
-
-
-def transform_matrix(transform_value) -> np.ndarray:
-    _, quat_xyzw = transform_expand(transform_value)
-    return R_scipy.from_quat(quat_xyzw).as_matrix()
 
 
 def site_world_pose(model, state, site_index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -93,9 +68,10 @@ def site_local_pose(model, site_index: int) -> tuple[np.ndarray, np.ndarray]:
     return site_local_pos, R_scipy.from_quat(site_local_quat).as_matrix()
 
 
-def builder_shape_local_pose(builder, shape_index: int) -> tuple[np.ndarray, np.ndarray]:
-    shape_local_pos, shape_local_quat = transform_expand(builder.shape_transform[shape_index])
-    return shape_local_pos, R_scipy.from_quat(shape_local_quat).as_matrix()
+def site_static_transform(stamp, model, site_index: int, child_frame: str, parent_frame: str = BASE_FRAME):
+    """Static TF from *parent_frame* to a sensor frame sitting at the site's local pose."""
+    site_pos_local, site_rot = site_local_pose(model, site_index)
+    return make_transform(stamp, parent_frame, child_frame, site_pos_local, quat_from_matrix(site_rot))
 
 
 def warp_transform(position: np.ndarray, rotation_matrix: np.ndarray):

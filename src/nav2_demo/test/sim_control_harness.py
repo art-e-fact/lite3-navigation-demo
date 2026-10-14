@@ -15,12 +15,23 @@ import rclpy
 import rclpy.context
 import yaml
 from nav_msgs.msg import Odometry
+from nav_msgs.msg import Path as PlanMsg
 from rclpy.executors import SingleThreadedExecutor
 from rosgraph_msgs.msg import Clock
 
 
 STOP_TIMEOUT_SEC = 10.0
 KILL_TIMEOUT_SEC = 5.0
+SPIN_TIMEOUT_SEC = 0.1  # how long one executor spin waits for a message
+WAIT_POLL_SEC = 0.05  # how often wait() re-checks its predicate
+SPIN_JOIN_TIMEOUT_SEC = 5.0  # how long stop() waits for the spin thread to finish
+LOG_TAIL_LINES = 80  # enough to show a crash's traceback in a failure message
+DOMAIN_ID_BASE = 200  # ROS domain ids from here up, clear of the default 0
+DOMAIN_ID_SPAN = 30  # the pid picks one of this many, so parallel runs rarely collide
+ODOM_QUEUE_DEPTH = 20  # odom is the fastest topic, so it gets the deepest queue
+CLOCK_QUEUE_DEPTH = 10
+PLAN_QUEUE_DEPTH = 10
+GOAL_ROUND_DIGITS = 1  # plans are keyed by goal rounded to 0.1 m (see _plans)
 
 _PROCESS_GROUPS: set[int] = set()
 _PROCESS_GROUP_IDS: dict[int, int] = {}
@@ -57,6 +68,7 @@ atexit.register(_cleanup_process_groups)
 
 # Rerun viewer cleanup
 VIEWER_STOP_TIMEOUT_SEC = 3.0
+VIEWER_POLL_SEC = 0.1
 _INITIAL_RERUN_VIEWER_PIDS: set[int] | None = None
 
 
@@ -117,7 +129,7 @@ def _terminate_rerun_viewers(pids: set[int]) -> None:
             pass
     deadline = time.monotonic() + VIEWER_STOP_TIMEOUT_SEC
     while time.monotonic() < deadline and any(_pid_alive(pid) for pid in pids):
-        time.sleep(0.1)
+        time.sleep(VIEWER_POLL_SEC)
     for pid in pids:
         if _pid_alive(pid):
             try:
@@ -126,7 +138,7 @@ def _terminate_rerun_viewers(pids: set[int]) -> None:
                 pass
 
 
-def _tail(path: Path, lines: int = 80) -> str:
+def _tail(path: Path, lines: int = LOG_TAIL_LINES) -> str:
     if not path.exists():
         return ''
     return ''.join(
@@ -244,7 +256,7 @@ class SimControlHarness:
         self._control_package = control_package
         self._control_launch_file = control_launch_file
         self._domain_id = (
-            domain_id if domain_id is not None else str(200 + (os.getpid() % 30))
+            domain_id if domain_id is not None else str(DOMAIN_ID_BASE + (os.getpid() % DOMAIN_ID_SPAN))
         )
         self._sim_pixi_env = sim_pixi_env or subprocess.run(
             ['scripts/sim_pixi_env.sh'],
@@ -278,6 +290,10 @@ class SimControlHarness:
         self._message_count = 0
         # (sim time s, x m, y m, yaw rad, speed m/s) per odom message, for reports.
         self._trace: list[tuple[float, float, float, float, float]] = []
+        # Nav2's first plan for each goal, keyed by the goal (x, y) rounded to 0.1 m:
+        # the planner republishes every cycle from wherever the robot is, so later
+        # plans for the same goal are not the route it meant to drive.
+        self._plans: dict[tuple[float, float], list[tuple[float, float]]] = {}
         self._previous_xy: tuple[float, float] | None = None
         self._last_xy: tuple[float, float] | None = None
         self._first_clock_sec: float | None = None
@@ -309,7 +325,7 @@ class SimControlHarness:
 
         pixi_exe = os.environ.get('PIXI_EXE', 'pixi')
         sim_pythonpath = os.pathsep.join(
-            p for p in [str(self._sim_package_root), os.environ.get('PYTHONPATH', '')] if p
+            path for path in [str(self._sim_package_root), os.environ.get('PYTHONPATH', '')] if path
         )
         sim_python = 'python'
         self._context = rclpy.context.Context()
@@ -321,8 +337,9 @@ class SimControlHarness:
         self._executor = SingleThreadedExecutor(context=self._context)
         self._executor.add_node(self._node)
 
-        self._node.create_subscription(Odometry, self._odom_topic, self._odom_callback, 20)
-        self._node.create_subscription(Clock, self._clock_topic, self._clock_callback, 10)
+        self._node.create_subscription(Odometry, self._odom_topic, self._odom_callback, ODOM_QUEUE_DEPTH)
+        self._node.create_subscription(Clock, self._clock_topic, self._clock_callback, CLOCK_QUEUE_DEPTH)
+        self._node.create_subscription(PlanMsg, '/plan', self._plan_callback, PLAN_QUEUE_DEPTH)
 
         self._sim_log_path = self._log_dir / 'sim.log'
         self._sim_proc, self._sim_log_file = _start_process(
@@ -344,7 +361,7 @@ class SimControlHarness:
         self._control_proc, self._control_log_file = _start_process(
             cmd=(
                 ['ros2', 'launch', self._control_package, self._control_launch_file]
-                + [f'{k}:={v}' for k, v in self._control_launch_args.items()]
+                + [f'{name}:={value}' for name, value in self._control_launch_args.items()]
             ),
             log_path=self._control_log_path,
             domain_id=self._domain_id,
@@ -371,7 +388,7 @@ class SimControlHarness:
             if self._sim_proc is not None and self._sim_proc.poll() is not None:
                 # Let the spin loop report SIM_EXITED with the log tail.
                 return
-            self._executor.spin_once(timeout_sec=0.1)
+            self._executor.spin_once(timeout_sec=SPIN_TIMEOUT_SEC)
         self._node.get_logger().warn(
             f'no /clock from the simulator within {self._sim_ready_timeout_sec:.0f} s; '
             'launching the control stack anyway'
@@ -399,6 +416,14 @@ class SimControlHarness:
                     self._total_distance_m += step_m
                     if step_m >= self._stall_min_step_m:
                         self._last_moved_wall_time = now
+
+    def _plan_callback(self, msg: PlanMsg) -> None:
+        if not msg.poses:
+            return
+        goal = msg.poses[-1].pose.position
+        with self._lock:
+            self._plans.setdefault((round(goal.x, GOAL_ROUND_DIGITS), round(goal.y, GOAL_ROUND_DIGITS)),
+                                   [(pose.pose.position.x, pose.pose.position.y) for pose in msg.poses])
 
     def _clock_callback(self, msg: Clock) -> None:
         stamp_sec = float(msg.clock.sec) + float(msg.clock.nanosec) * 1e-9
@@ -463,7 +488,7 @@ class SimControlHarness:
                 self._stop_event.set()
                 break
 
-            self._executor.spin_once(timeout_sec=0.1)
+            self._executor.spin_once(timeout_sec=SPIN_TIMEOUT_SEC)
 
     def wait(
         self,
@@ -486,13 +511,13 @@ class SimControlHarness:
                 return self.stop_reason
             if deadline is not None and time.monotonic() >= deadline:
                 return self.stop_reason
-            time.sleep(0.05)
+            time.sleep(WAIT_POLL_SEC)
 
     def stop(self) -> None:
         """Gracefully stop both processes and tear down ROS resources."""
         self._stop_event.set()
         if self._spin_thread is not None:
-            self._spin_thread.join(timeout=5.0)
+            self._spin_thread.join(timeout=SPIN_JOIN_TIMEOUT_SEC)
         self._log_real_time_factor()
         if self._executor is not None:
             self._executor.shutdown(timeout_sec=0.0)
@@ -578,6 +603,12 @@ class SimControlHarness:
             return list(self._trace)
 
     @property
+    def plans(self) -> list[list[tuple[float, float]]]:
+        """Nav2's first plan for each goal it was sent, as (x m, y m) points in the map frame."""
+        with self._lock:
+            return list(self._plans.values())
+
+    @property
     def message_count(self) -> int:
         """Number of odometry messages received."""
         with self._lock:
@@ -607,10 +638,10 @@ class SimControlHarness:
         """``True`` if the control process is still running."""
         return self._control_proc is not None and self._control_proc.poll() is None
 
-    def sim_log_tail(self, lines: int = 80) -> str:
+    def sim_log_tail(self, lines: int = LOG_TAIL_LINES) -> str:
         """Return the last *lines* lines of the simulation process log."""
         return _tail(self._sim_log_path, lines) if self._sim_log_path else ''
 
-    def control_log_tail(self, lines: int = 80) -> str:
+    def control_log_tail(self, lines: int = LOG_TAIL_LINES) -> str:
         """Return the last *lines* lines of the control process log."""
         return _tail(self._control_log_path, lines) if self._control_log_path else ''

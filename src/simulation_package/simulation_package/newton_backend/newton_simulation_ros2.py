@@ -20,6 +20,7 @@ from ros_bridge import NewtonRosBridge
 from simulation import DT, ROS_SPIN_EVERY_STEPS, ROBOT_PROFILES, NewtonSimulation, create_newton_viewer
 from sensors.newton.sensor_manager import NewtonSensorManager, NewtonSensorOptions
 from simulation_config import SimulationConfig
+from utils import step_interval
 
 RENDER_EVERY_STEPS = 5
 
@@ -34,11 +35,7 @@ RERUN_FLUSH_EVERY_RECORDS = 100
 
 
 def _aim_viewer_at_robot(viewer, sim: NewtonSimulation):
-    """Point the optional Newton viewer at the robot's spawn.
-
-    Procedural scenes drop the robot wherever the mainline starts, which can be
-    tens of metres off the viewer's default look-at point.
-    """
+    """Point the optional Newton viewer at the robot's spawn."""
     set_camera = getattr(viewer, "set_camera", None)
     if set_camera is None:
         return
@@ -96,7 +93,7 @@ def run_loop(
         if sim.step_count % ROS_SPIN_EVERY_STEPS == 0:
             ros.spin_once()
         sim.set_command(ros.read_latest_action())
-        sim.step(ros.first_command_time)
+        sim.step()
         ros.publish_clock(sim.timestamp)
 
         state = None
@@ -144,9 +141,6 @@ def run_newton(config: SimulationConfig, ros_args: list[str] | None = None):
     ros = NewtonRosBridge(headless=config.headless, model_path=model_path, profile=profile)
     sensor_options = NewtonSensorOptions(
         lidar_2d=config.sensors.lidar_2d,
-        mid360=config.sensors.mid360,
-        realsense=config.sensors.realsense,
-        robosense=config.sensors.robosense,
         follow_camera=config.sensors.follow_camera,
         overhead_camera=config.sensors.overhead_camera,
     )
@@ -158,11 +152,8 @@ def run_newton(config: SimulationConfig, ros_args: list[str] | None = None):
         logger=ros.get_logger(),
         sensor_options=sensor_options,
         profile=profile,
-        procedural_scene=config.procedural_scene_name(),
-        procedural_seed=config.procedural_env_seed,
         start_pose=config.robot.start_pose,
     )
-    ros.set_scene_meta(sim.scene_meta)
     if viewer is not None:
         _aim_viewer_at_robot(viewer, sim)
 
@@ -175,11 +166,6 @@ def run_newton(config: SimulationConfig, ros_args: list[str] | None = None):
             headless=config.headless,
             logger=ros.get_logger(),
         )
-        railway_scene = sim.scene_meta.get("railway_scene")
-        if railway_scene is not None:
-            # Backend-neutral: logs /network/rails, /network/sleepers and the
-            # /network/mission_waypoints the recording tests read.
-            railway_scene.log_rerun()
 
     sensors = NewtonSensorManager(
         sim.model,
@@ -191,7 +177,7 @@ def run_newton(config: SimulationConfig, ros_args: list[str] | None = None):
         viewer=viewer,
     )
 
-    state_every_steps = max(1, int(round(1.0 / (config.robot.state_frequency_hz * DT))))
+    state_every_steps = step_interval(config.robot.state_frequency_hz, DT)
 
     try:
         warmup_sec = warm_up(sim, sensors, recorder)

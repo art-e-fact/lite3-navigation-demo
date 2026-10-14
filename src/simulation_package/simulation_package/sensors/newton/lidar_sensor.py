@@ -3,25 +3,22 @@
 import math
 import newton
 import numpy as np
-from newton._src.sensors.sensor_tiled_camera import SensorTiledCamera
 from sensor_msgs.msg import LaserScan
 
-from sensors.common.lidar import (
-    LIDAR_FRAME_ID,
-    LIDAR_FREQUENCY_HZ,
-    LIDAR_SITE_NAME,
-    LIDAR_TOPIC,
-    NUM_RAYS,
-    RANGE_MAX,
-    RANGE_MIN,
-    planar_lidar_dirs,
-)
-from sensors.common.transforms import make_transform, quat_from_matrix, sim_time_stamp
-from sensors.newton.geometry import camera_transforms, find_builder_shape_index, find_site_index, site_local_pose, site_world_pose
-from sensors.newton.ray_buffers import rays_from_dirs
+from constants import SENSOR_QUEUE_DEPTH
+from sensors.common.lidar import planar_lidar_dirs
+from sensors.common.transforms import sim_time_stamp
+from sensors.newton.geometry import find_builder_shape_index, find_site_index, site_static_transform
+from sensors.newton.ray_buffers import SiteRayCaster, rays_from_dirs
 from simulation_config import Lidar2DConfig
 
 MAX_ALL_INF_DEBUG_LOGS = 5
+# Site marker cylinder (radius, half height, unused) [m]: a 5 cm puck.
+LIDAR_MARKER_SCALE = (0.025, 0.01, 0.0)
+# Site marker colour, RGB 0..1: dark grey.
+LIDAR_MARKER_COLOR = (0.1, 0.1, 0.1)
+# Hit-body sentinel for missed rays; distinct from every body index and from -1 (world).
+NO_HIT_BODY = -9999
 
 
 class NewtonLidarSensor:
@@ -30,8 +27,8 @@ class NewtonLidarSensor:
         config = config or Lidar2DConfig()
         site_index = find_builder_shape_index(builder, config.site_name)
         builder.shape_type[site_index] = newton.GeoType.CYLINDER
-        builder.shape_scale[site_index] = (0.025, 0.01, 0.0)
-        builder.shape_color[site_index] = (0.1, 0.1, 0.1)
+        builder.shape_scale[site_index] = LIDAR_MARKER_SCALE
+        builder.shape_color[site_index] = LIDAR_MARKER_COLOR
         # Not VISIBLE: the rays start at this shape's centre and SensorTiledCamera casts
         # against every rendered shape, so a visible marker is hit by all 360 rays at
         # 2.5 cm (its own wall) and the scan is all inf.
@@ -53,11 +50,9 @@ class NewtonLidarSensor:
         self.shape_body = model.shape_body.numpy()
         self.local_dirs = planar_lidar_dirs(self.config.num_rays)
         self.rays = rays_from_dirs(self.local_dirs)
-        self.sensor = SensorTiledCamera(model, load_textures=False)
-        self.depth_image = self.sensor.utils.create_depth_image_output(self.config.num_rays, 1)
-        self.shape_index_image = self.sensor.utils.create_shape_index_image_output(self.config.num_rays, 1)
+        self.caster = SiteRayCaster(model, self.site_index, self.config.num_rays)
 
-        self.pub = node.create_publisher(LaserScan, self.config.topic, 10)
+        self.pub = node.create_publisher(LaserScan, self.config.topic, SENSOR_QUEUE_DEPTH)
         self.angle_increment = 2.0 * math.pi / self.config.num_rays
         self.scan_time = 1.0 / self.config.frequency_hz
         self.time_increment = self.scan_time / max(1, self.config.num_rays - 1)
@@ -70,18 +65,7 @@ class NewtonLidarSensor:
         if not self.enabled:
             return
 
-        site_pos, site_rot, _ = site_world_pose(self.model, state, self.site_index)
-        transforms = camera_transforms(site_pos, site_rot, self.model.world_count)
-        self.sensor.update(
-            state,
-            transforms,
-            self.rays,
-            depth_image=self.depth_image,
-            shape_index_image=self.shape_index_image,
-        )
-
-        ranges = self.depth_image.numpy()[0, 0, 0].astype(np.float32)
-        shape_indices = self.shape_index_image.numpy()[0, 0, 0]
+        ranges, shape_indices, site_pos = self.caster.cast(state, self.rays)
         raw_hit_count = int(np.count_nonzero(ranges > 0.0))
 
         ranges[ranges <= 0.0] = float("inf")
@@ -90,7 +74,7 @@ class NewtonLidarSensor:
 
         # SensorTiledCamera has no bodyexclude option, so filter hits on the mounting body.
         valid_shape = shape_indices < len(self.shape_body)
-        hit_bodies = np.full(shape_indices.shape, -9999, dtype=np.int32)
+        hit_bodies = np.full(shape_indices.shape, NO_HIT_BODY, dtype=np.int32)
         hit_bodies[valid_shape] = self.shape_body[shape_indices[valid_shape].astype(np.int64)]
         ranges[hit_bodies == self.body_id] = float("inf")
         self_filtered_count = int(np.count_nonzero(ranges < float("inf")))
@@ -119,5 +103,4 @@ class NewtonLidarSensor:
     def get_static_transforms(self, stamp):
         if not self.enabled or self.site_index < 0:
             return []
-        site_pos_local, site_rot = site_local_pose(self.model, self.site_index)
-        return [make_transform(stamp, "base_link", self.config.frame_id, site_pos_local, quat_from_matrix(site_rot))]
+        return [site_static_transform(stamp, self.model, self.site_index, self.config.frame_id)]

@@ -22,6 +22,8 @@ import rerun as rr
 
 import newton
 
+from utils import log
+
 # Rerun implicit-frame prefix; see rerun_loader_mjcf.__init__ for the rationale.
 _TF = "tf#"
 
@@ -305,7 +307,7 @@ class NewtonRerunRecorder:
             body_name = self._world_name if body < 0 else self.body_names[body]
             frame = self.body_frame(body_name)
             shapes = visual.get(body) or collision.get(body) or []
-            names = _deduplicate([_last_segment(shape_labels[s]) for s in shapes])
+            names = _deduplicate([_last_segment(shape_labels[shape]) for shape in shapes])
             for shape, shape_name in zip(shapes, names):
                 path = f"{VISUAL_ROOT}/{body_name}/{shape_name}"
                 color = _rgba_uint8(shape_color[shape] if shape_color is not None else _DEFAULT_COLOR)
@@ -456,13 +458,7 @@ class NewtonRerunRecorder:
     # -- logging ------------------------------------------------------------
 
     def _log_info(self, message: str) -> None:
-        if self.logger is not None:
-            self.logger.info(f"[INFO] {message}")
-        else:
-            print(f"[INFO] {message}")
+        log(self.logger, "info", message)
 
     def _log_warn(self, message: str) -> None:
-        if self.logger is not None:
-            self.logger.warn(f"[WARN] {message}")
-        else:
-            print(f"[WARN] {message}")
+        log(self.logger, "warn", message)

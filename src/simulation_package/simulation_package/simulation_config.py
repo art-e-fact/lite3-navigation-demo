@@ -24,9 +24,9 @@ ASSETS_DIR_NAME = "assets"
 DEFAULT_SCENE_URI = "package://simulation_package/assets/lite3_mjcf/mjcf/stairs_floors.xml"
 DEFAULT_ROBOT_DESCRIPTION_URI = "package://simulation_package/assets/lite3_mjcf/mjcf/Lite3.xml"
 M20_ROBOT_DESCRIPTION_URI = "package://simulation_package/assets/m20_mjcf/mjcf/M20.xml"
-DEFAULT_USD_URI = "package://simulation_package/assets/Lite3_usd/Lite3.usd"
-PROCEDURAL_SCENE_PREFIX = "procedural://"
-SUPPORTED_PROCEDURAL_SCENES = {"blocks", "railroad"}
+PACKAGE_URI_PREFIX = "package://"
+# File suffixes accepted as MuJoCo MJCF scene/robot descriptions.
+MJCF_SUFFIXES = {".xml", ".mjcf"}
 HF_URI_PREFIX = "hf://"
 # Hub web URLs are accepted too, so a link copied from the browser works as-is.
 HF_URI_PREFIXES = (HF_URI_PREFIX, "https://huggingface.co/", "https://hf.co/")
@@ -47,44 +47,6 @@ ROBOT_PRESETS: dict[str, dict[str, str | float]] = {
 
 
 @dataclass
-class RealsenseConfig:
-	enable_depth: bool = False
-	enable_color: bool = False
-	enable_pointcloud: bool = False
-	width: int = 640
-	height: int = 480
-	frequency_hz: float = 15.0
-	depth_range_min: float = 0.105
-	depth_range_max: float = 10.0
-	depth_fx: float = 382.68
-	depth_fy: float = 382.68
-	depth_cx: float = 320.0
-	depth_cy: float = 240.0
-	color_fx: float = 615.69
-	color_fy: float = 615.69
-	color_cx: float = 320.0
-	color_cy: float = 240.0
-	depth_image_topic: str = "/camera/depth/image_rect_raw"
-	depth_info_topic: str = "/camera/depth/camera_info"
-	color_image_topic: str = "/camera/color/image_raw"
-	color_info_topic: str = "/camera/color/camera_info"
-	pointcloud_topic: str = "/camera/depth/color/points"
-	depth_optical_frame: str = "camera_depth_optical_frame"
-	color_optical_frame: str = "camera_color_optical_frame"
-	camera_link_frame: str = "camera_link"
-	depth_frame: str = "camera_depth_frame"
-	color_frame: str = "camera_color_frame"
-	mount_site_name: str = "d435i_mount"
-	depth_camera_name: str = "d435i-depth"
-	color_camera_name: str = "d435i-color"
-	forward_offset: list[float] = field(default_factory=lambda: [0.01, 0.0, 0.0])
-
-	@property
-	def enabled(self) -> bool:
-		return self.enable_depth or self.enable_color
-
-
-@dataclass
 class Lidar2DConfig:
 	enabled: bool = False
 	site_name: str = "lidar_site"
@@ -95,54 +57,6 @@ class Lidar2DConfig:
 	range_min: float = 0.15
 	range_max: float = 8.0
 	visualize_rays: bool = False
-
-
-@dataclass
-class Mid360Config:
-	enabled: bool = False
-	mount_site_name: str = "mid360_mount"
-	attachment_prefix: str = "mid360-"
-	sensor_site_name: str = "lidar_frame"
-	frame_id: str = "mid360"
-	topic: str = "/mid360/points"
-	frequency_hz: float = 10.0
-	pattern_file: str = "mid360.npy"
-	samples_per_scan: int = 24000
-	range_min: float = 0.1
-	range_max: float = 200.0
-	downsample: int = 1
-
-	@property
-	def attached_site_name(self) -> str:
-		return f"{self.attachment_prefix}{self.sensor_site_name}"
-
-
-@dataclass
-class RobosenseUnitConfig:
-	site_name: str = "lidar_front_site"
-	frame_id: str = "lidar_front"
-	topic: str = "/lidar_front/points"
-
-
-@dataclass
-class RobosenseConfig:
-	enabled: bool = False
-	frequency_hz: float = 10.0
-	channels: int = 96
-	columns: int = 448
-	column_downsample: int = 8
-	v_fov_deg: list[float] = field(default_factory=lambda: [-45.0, 45.0])
-	range_min: float = 0.1
-	range_max: float = 30.0
-	enable_rear: bool = True
-	front: RobosenseUnitConfig = field(default_factory=RobosenseUnitConfig)
-	rear: RobosenseUnitConfig = field(
-		default_factory=lambda: RobosenseUnitConfig(
-			site_name="lidar_back_site",
-			frame_id="lidar_back",
-			topic="/lidar_back/points",
-		)
-	)
 
 
 @dataclass
@@ -168,10 +82,7 @@ class FollowCameraConfig:
 
 @dataclass
 class SensorsConfig:
-	realsense: RealsenseConfig = field(default_factory=RealsenseConfig)
 	lidar_2d: Lidar2DConfig = field(default_factory=Lidar2DConfig)
-	mid360: Mid360Config = field(default_factory=Mid360Config)
-	robosense: RobosenseConfig = field(default_factory=RobosenseConfig)
 	follow_camera: FollowCameraConfig = field(default_factory=FollowCameraConfig)
 	# A second video, same options, rendered off its own offscreen viewer.
 	overhead_camera: FollowCameraConfig = field(default_factory=FollowCameraConfig)
@@ -192,8 +103,7 @@ class RerunConfig:
 class StartPoseConfig:
 	"""Where the robot starts, in the scene's frame (metres, yaw in radians).
 
-	A field left unset keeps the scene's own start: procedural scenes place the
-	robot themselves, static scenes start it at the origin. Set from a config
+	A field left unset keeps the default start (DEFAULT_ROBOT_START_POSE). Set from a config
 	file (robot: {start_pose: {x: 1.0, y: -0.5, yaw: 1.57}}) or on the command
 	line (--set robot.start_pose.x=1.0), e.g. from a recorded route's start.
 	"""
@@ -235,7 +145,6 @@ class SimulationConfig:
 	scene: str = DEFAULT_SCENE_URI
 	robot: RobotConfig = field(default_factory=RobotConfig)
 	headless: bool = True
-	procedural_env_seed: int = -1
 	sensors: SensorsConfig = field(default_factory=SensorsConfig)
 	rerun: RerunConfig = field(default_factory=RerunConfig)
 
@@ -261,19 +170,10 @@ class SimulationConfig:
 		return self.from_dict(data)
 
 	def resolved_scene(self) -> str | None:
-		if self.procedural_scene_name() is not None:
-			return None
 		raw = str(self.scene).strip()
 		if not raw:
 			return None
 		return str(resolve_path(raw))
-
-	def procedural_scene_name(self) -> str | None:
-		raw = str(self.scene).strip()
-		if not raw.lower().startswith(PROCEDURAL_SCENE_PREFIX):
-			return None
-		name = raw[len(PROCEDURAL_SCENE_PREFIX):].strip().lower()
-		return name or None
 
 	def resolved_robot_description(self) -> str:
 		return str(resolve_path(self.robot.robot_description))
@@ -290,20 +190,15 @@ class SimulationConfig:
 			errors.append(str(exc))
 
 		scene_value = str(self.scene).strip()
-		procedural_scene = self.procedural_scene_name()
 		scene_path = None
-		if procedural_scene is not None:
-			if procedural_scene not in SUPPORTED_PROCEDURAL_SCENES:
-				supported = ", ".join(f"{PROCEDURAL_SCENE_PREFIX}{name}" for name in sorted(SUPPORTED_PROCEDURAL_SCENES))
-				errors.append(f"scene must be an MJCF/XML file or one of: {supported}")
-		elif scene_value:
+		if scene_value:
 			scene_path = resolve_path(scene_value, must_exist=False)
 		robot_path = resolve_path(self.robot.robot_description, must_exist=False)
-		if scene_path is not None and scene_path.suffix.lower() not in {".xml", ".mjcf"}:
+		if scene_path is not None and scene_path.suffix.lower() not in MJCF_SUFFIXES:
 			errors.append("scene must be an MJCF/XML file")
 		if robot_path.suffix.lower() == ".usd" and simulator != "newton":
 			errors.append("USD robot_description is only supported by the Newton simulator")
-		if robot_path.suffix.lower() not in {".xml", ".mjcf", ".usd"}:
+		if robot_path.suffix.lower() not in MJCF_SUFFIXES | {".usd"}:
 			errors.append("robot_description must be an MJCF/XML or USD file")
 		if scene_path is not None and not scene_path.exists():
 			errors.append(f"scene does not exist: {scene_path}")
@@ -317,28 +212,9 @@ class SimulationConfig:
 				errors.append(f"robot.start_pose.{axis} must be a number")
 
 		sensors = self.sensors
-		if sensors.realsense.enable_pointcloud and not sensors.realsense.enable_depth:
-			errors.append("sensors.realsense.enable_pointcloud requires sensors.realsense.enable_depth")
-		_validate_positive(errors, "sensors.realsense.width", sensors.realsense.width)
-		_validate_positive(errors, "sensors.realsense.height", sensors.realsense.height)
-		_validate_positive(errors, "sensors.realsense.frequency_hz", sensors.realsense.frequency_hz)
-		_validate_range(errors, "sensors.realsense.depth", sensors.realsense.depth_range_min, sensors.realsense.depth_range_max)
 		_validate_positive(errors, "sensors.lidar_2d.frequency_hz", sensors.lidar_2d.frequency_hz)
 		_validate_positive(errors, "sensors.lidar_2d.num_rays", sensors.lidar_2d.num_rays)
 		_validate_range(errors, "sensors.lidar_2d", sensors.lidar_2d.range_min, sensors.lidar_2d.range_max)
-		_validate_positive(errors, "sensors.mid360.frequency_hz", sensors.mid360.frequency_hz)
-		_validate_positive(errors, "sensors.mid360.samples_per_scan", sensors.mid360.samples_per_scan)
-		_validate_positive(errors, "sensors.mid360.downsample", sensors.mid360.downsample)
-		_validate_range(errors, "sensors.mid360", sensors.mid360.range_min, sensors.mid360.range_max)
-		_validate_positive(errors, "sensors.robosense.frequency_hz", sensors.robosense.frequency_hz)
-		_validate_positive(errors, "sensors.robosense.channels", sensors.robosense.channels)
-		_validate_positive(errors, "sensors.robosense.columns", sensors.robosense.columns)
-		_validate_positive(errors, "sensors.robosense.column_downsample", sensors.robosense.column_downsample)
-		_validate_range(errors, "sensors.robosense", sensors.robosense.range_min, sensors.robosense.range_max)
-		if len(sensors.robosense.v_fov_deg) != 2:
-			errors.append("sensors.robosense.v_fov_deg must have exactly two elements [min, max]")
-		elif sensors.robosense.v_fov_deg[0] >= sensors.robosense.v_fov_deg[1]:
-			errors.append("sensors.robosense.v_fov_deg min must be less than max")
 		for name, camera in (("follow_camera", sensors.follow_camera), ("overhead_camera", sensors.overhead_camera)):
 			if camera.enabled and not str(camera.video_path).strip():
 				errors.append(f"sensors.{name}.video_path must be set when camera recording is enabled")
@@ -448,8 +324,8 @@ def resolve_path(path_value: str | os.PathLike[str], must_exist: bool = False) -
 	raw = str(path_value).strip()
 	if raw.startswith(HF_URI_PREFIXES):
 		return _resolve_hf_uri(raw)
-	if raw.startswith("package://"):
-		package_and_path = raw[len("package://") :]
+	if raw.startswith(PACKAGE_URI_PREFIX):
+		package_and_path = raw[len(PACKAGE_URI_PREFIX) :]
 		package, _, rel = package_and_path.partition("/")
 		if package.lower() not in {PACKAGE_NAME, LEGACY_PACKAGE_NAME}:
 			raise ValueError(
@@ -477,9 +353,6 @@ def resolve_path(path_value: str | os.PathLike[str], must_exist: bool = False) -
 			root,
 			root / "lite3_mjcf" / "mjcf",
 			root / "m20_mjcf" / "mjcf",
-			root / "Lite3_usd",
-			root / "realsense_d435i",
-			root / "mid360",
 		):
 			resolved = (base / candidate).resolve()
 			if resolved.exists():

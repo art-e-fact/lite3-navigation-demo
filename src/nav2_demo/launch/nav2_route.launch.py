@@ -60,8 +60,8 @@ def launch_setup(context, *args, **kwargs):
         # only ever see real scans.
         TimerAction(period=float(nav2_delay), actions=[IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(nav2_share, 'launch', 'bringup_launch.py')),
-            launch_arguments={k: v for k, v in nav2_args.items()
-                              if k in ('map', 'params_file', 'use_sim_time', 'autostart', 'use_composition')}.items(),
+            launch_arguments={key: value for key, value in nav2_args.items()
+                              if key in ('map', 'params_file', 'use_sim_time', 'autostart', 'use_composition')}.items(),
         )]),
     ]
     if use_rviz:
