@@ -13,7 +13,9 @@ from PIL import Image
 # trace rows are (sim time s, x m, y m, yaw rad, speed m/s), from SimControlHarness.trace
 
 # Legend across the top of the plot: the dashboard clips a legend down the right-hand side.
-LEGEND_TOP = dict(orientation='h', yanchor='bottom', y=1.0, xanchor='right', x=1)
+# entrywidth fixes each entry's width so entries cannot overlap when the viewer
+# measures text before its fonts have loaded.
+LEGEND_TOP = dict(orientation='h', yanchor='bottom', y=1.0, xanchor='right', x=1, entrywidth=130)
 
 # Plotly's default blue, red and green, so the charts match the usual palette.
 BLUE = '#1f77b4'
