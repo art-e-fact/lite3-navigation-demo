@@ -26,6 +26,45 @@ START_MARKER_SIZE = 14  # the star is larger than the waypoint dots so it stands
 WAYPOINT_MARKER_SIZE = 11
 GRAY_MAX = 255  # an 8-bit grayscale map image: 0 black (occupied) to 255 white (free)
 PATH_MARGIN_M = 3.0  # empty space kept around the path and waypoints in the path chart
+WALKING_MPS = 0.05  # slower than this counts as standing
+MIN_SEGMENT_LENGTH_SQ = 1e-12  # two waypoints on the same spot: avoid dividing by zero
+
+
+def trace_metrics(trace, route, plans=()) -> dict:
+    """Numbers for metrics.json from the odom trace and Nav2's plans, on top of
+    RouteResult.metrics(). Unrounded; the test rounds when it writes."""
+    path = np.array([(row[1], row[2]) for row in trace])
+    times = np.array([row[0] for row in trace])
+    yaws = np.unwrap([row[3] for row in trace])
+    speeds = np.array([row[4] for row in trace])
+    walking = speeds > WALKING_MPS
+    line = np.array([(pose.x, pose.y) for pose in [route.initial_pose, *route.waypoints]])
+    deviation = _distance_to_line(path, line)
+    walked = np.linalg.norm(np.diff(path, axis=0), axis=1).sum()
+    planned = sum(np.linalg.norm(np.diff(np.array(plan), axis=0), axis=1).sum() for plan in plans)
+    yaw_rates = np.abs(np.diff(yaws) / np.maximum(np.diff(times), 1e-6))
+    return dict(
+        distance_walked_m=walked,
+        mean_walking_speed_mps=speeds[walking].mean() if walking.any() else 0.0,
+        max_speed_mps=speeds.max(),
+        stationary_fraction=1.0 - walking.mean(),
+        max_route_deviation_m=deviation.max(),
+        mean_route_deviation_m=deviation.mean(),
+        max_yaw_rate_rads=yaw_rates.max() if len(yaw_rates) else 0.0,
+        replans=max(len(plans) - len(route.waypoints), 0),
+        # walked over planned: 1 is on the plan, more is wandering; 0 when no plan was seen
+        path_efficiency=walked / planned if planned else 0.0,
+    )
+
+
+def _distance_to_line(points, line):
+    """Each point's distance to the nearest segment of the polyline."""
+    starts, segments = line[:-1], np.diff(line, axis=0)
+    from_starts = points[:, None] - starts  # each point from each segment's start
+    lengths_sq = np.maximum((segments * segments).sum(-1), MIN_SEGMENT_LENGTH_SQ)
+    # how far along each segment its nearest point is, from 0 (its start) to 1 (its end)
+    fractions = np.clip((from_starts * segments).sum(-1) / lengths_sq, 0, 1)
+    return np.linalg.norm(from_starts - fractions[..., None] * segments, axis=-1).min(axis=1)
 
 
 def write_trace_csv(trace, path: Path) -> None:

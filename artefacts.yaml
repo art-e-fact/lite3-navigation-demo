@@ -15,6 +15,7 @@ jobs:
 
     scenarios:
       defaults:
+        metrics: metrics.json
         params:
           headless: "true"
       settings:

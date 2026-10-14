@@ -19,3 +19,4 @@ imgui.ini
 results/
 routes/
 !src/nav2_demo/routes/
+metrics.json

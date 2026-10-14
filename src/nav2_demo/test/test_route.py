@@ -12,13 +12,14 @@ Artefacts scenarios: headless. Environment: ROUTE picks a route file
 opens Nav2's RViz view alongside (the simulator's own viewer follows headless).
 """
 
+import json
 import os
 from pathlib import Path
 
 import pytest
 from artefacts_toolkit_navigation import follow_route, load_route, map_to_world, route_launch_args
 
-from report import path_chart, speed_chart, waypoint_chart, write_trace_csv
+from report import path_chart, speed_chart, trace_metrics, waypoint_chart, write_trace_csv
 from sim_control_harness import SimControlHarness, StopReason
 
 # Where the world, the simulator config and the route result go: Artefacts' upload
@@ -27,6 +28,8 @@ OUTPUT_FOLDER = Path(os.getenv('ARTEFACTS_SCENARIO_UPLOAD_DIR', 'results'))
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 SIM_PACKAGE_ROOT = REPO_ROOT / 'src' / 'simulation_package'
+METRICS = REPO_ROOT / 'metrics.json'  # artefacts.yaml's `metrics:`, read from where `artefacts run` runs
+METRIC_DECIMALS = 3
 # The route to drive: ROUTE=... if given, else the route recorded last (artefacts-route
 # record saves into ./routes), else the bundled depot route.
 ROUTE = (os.environ.get('ROUTE') or (None if Path('routes').is_dir() else PACKAGE_ROOT / 'routes' / 'depot.yaml'))
@@ -45,6 +48,7 @@ MAX_FINAL_ERROR_M = 0.5  # how close to the last waypoint counts as arrived
 
 def test_route_is_completed(tmp_path, headless):
     OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+    METRICS.unlink(missing_ok=True)  # or a run that dies early reports the previous run's
     route = load_route(ROUTE)
 
     # The world: the route's map with its occupied cells raised into walls.
@@ -95,12 +99,18 @@ def test_route_is_completed(tmp_path, headless):
         trace = harness.trace
         plans = harness.plans
 
-    # The run's data, pass or fail: the odom trace as CSV and the charts.
+    # The run's data, pass or fail: the odom trace as CSV, the charts and the metrics.
+    metrics = result.metrics()
     waypoint_chart(result, OUTPUT_FOLDER / f'{route.name}_waypoints.html')
     if trace:
         write_trace_csv(trace, OUTPUT_FOLDER / f'{route.name}_odom.csv')
         path_chart(REPO_ROOT / route.map.file, route, trace, OUTPUT_FOLDER / f'{route.name}_path.html', plans)
         speed_chart(trace, route, OUTPUT_FOLDER / f'{route.name}_speed.html')
+        metrics.update(trace_metrics(trace, route, plans))
+    if result.waypoints:
+        metrics['time_to_first_waypoint_s'] = result.waypoints[0].time_s
+    METRICS.write_text(json.dumps({name: round(float(value), METRIC_DECIMALS) for name, value in metrics.items()},
+                                  indent=2))
 
     if reason is StopReason.SIM_EXITED:
         pytest.fail(f'simulation exited unexpectedly:\n{harness.sim_log_tail()}')
