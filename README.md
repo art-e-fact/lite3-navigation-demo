@@ -38,13 +38,14 @@ RViz opens with the map: **2D Pose Estimate** where the robot should start,
 
 ### 2. Drive it
 
-The test runs through [Artefacts](https://docs.artefacts.com), which passes it
+The test runs through the [Artefacts CLI](https://docs.artefacts.com) (install it from the
+.deb or `pip install artefacts-cli`), which passes it
 the scenario params from `artefacts.yaml` and collects what it writes:
 
 ```bash
-pixi run -e artefacts artefacts login   # once; set `project` in artefacts.yaml to yours
-pixi run -e artefacts artefacts run test-nav2-route
-SIM_PIXI_ENV=sim pixi run -e artefacts artefacts run test-nav2-route   # force the CPU Newton build
+artefacts login   # once; set `project` in artefacts.yaml to yours
+artefacts run test-nav2-route
+SIM_PIXI_ENV=sim artefacts run test-nav2-route   # force the CPU Newton build
 ```
 
 This takes the route recorded last, starts the simulator with the Lite3 at

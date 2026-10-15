@@ -173,15 +173,8 @@ pyyaml = ">=6.0.3,<7"
 plotly = ">=7.1.0,<8"
 pillow = ">=12,<13"
 
-[feature.artefacts.pypi-dependencies]
-artefacts-cli = "*"
-
-[feature.artefacts.dependencies]
-python = ">=3.14.5,<3.15"
-
 [environments]
 sim = ["sim", "rerun"]
 sim-gpu = ["sim", "sim-cuda", "rerun"]
 nav = ["nav"]
 nav-test = ["nav", "test"]
-artefacts = ["artefacts"]

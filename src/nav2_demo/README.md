@@ -28,7 +28,7 @@ open floor: the Lite3 is 0.56 x 0.30 m and walks at 0.3 m/s.
 ## Run it
 
 ```bash
-pixi run -e artefacts artefacts run test-nav2-route
+artefacts run test-nav2-route
 ```
 
 Drives the route recorded last. The params in `artefacts.yaml` pick the viewers
