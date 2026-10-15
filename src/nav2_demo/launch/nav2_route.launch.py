@@ -19,6 +19,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Opaq
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from nav2_common.launch import RewrittenYaml
 
 from artefacts_toolkit_navigation import load_route, route_launch_args
 
@@ -31,6 +32,10 @@ def launch_setup(context, *args, **kwargs):
     deploy_executable = LaunchConfiguration('deploy_executable').perform(context).strip()
     deploy_args_raw = LaunchConfiguration('deploy_args').perform(context).strip()
     nav2_delay = LaunchConfiguration('nav2_delay').perform(context).strip() or '0'
+    linear_vel = LaunchConfiguration('linear_vel').perform(context).strip()
+    if linear_vel:  # one knob over the params file, so Artefacts scenarios can sweep it
+        params_file = RewrittenYaml(source_file=params_file, root_key='', convert_types=True,
+                                    param_rewrites={'controller_server.ros__parameters.FollowPath.desired_linear_vel': linear_vel})
 
     # Only the map is taken from the route here: the robot is spawned at the
     # route's start by the simulator (robot.start_pose in its config).
@@ -85,6 +90,10 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'use_rviz', default_value='false', description="Open Nav2's RViz view",
+        ),
+        DeclareLaunchArgument(
+            'linear_vel', default_value='',
+            description="Override FollowPath's desired_linear_vel (m/s); empty keeps params_file's value",
         ),
         DeclareLaunchArgument(
             'nav2_delay', default_value='10.0',

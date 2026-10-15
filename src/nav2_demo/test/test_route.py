@@ -6,8 +6,9 @@ route's map, and check that the robot got round.
 The simulator (Newton) runs in its own pixi environment with the
 robot spawned at the route's start; Nav2 and rl_deploy run from this
 environment via nav2_route.launch.py; the test itself drives the route with
-artefacts_toolkit_navigation.follow_route(). Param, also settable from
-Artefacts scenarios: headless. Environment: ROUTE picks a route file
+artefacts_toolkit_navigation.follow_route(). Params, also settable from
+Artefacts scenarios: headless, linear_vel (FollowPath's desired_linear_vel in m/s; a
+list in artefacts.yaml drives the route once per value). Environment: ROUTE picks a route file
 (default: the route recorded last, else the bundled depot route); RVIZ=true
 opens Nav2's RViz view alongside (the simulator's own viewer follows headless).
 """
@@ -19,6 +20,7 @@ from pathlib import Path
 import pytest
 from artefacts_toolkit_navigation import follow_route, load_route, map_to_world, route_launch_args
 
+from conftest import artefacts_params
 from report import path_chart, speed_chart, trace_metrics, waypoint_chart, write_trace_csv
 from sim_control_harness import SimControlHarness, StopReason
 
@@ -88,7 +90,9 @@ def test_route_is_completed(tmp_path, headless):
         sim_package_root=SIM_PACKAGE_ROOT,
         control_package='nav2_demo',
         control_launch_file='nav2_route.launch.py',
-        control_launch_args={'use_rviz': str(RVIZ).lower(), **({'route': str(ROUTE)} if ROUTE else {})},
+        # FollowPath's speed from the scenario's params; '' keeps the Nav2 config's value
+        control_launch_args={'use_rviz': str(RVIZ).lower(), 'linear_vel': str(artefacts_params().get('linear_vel', '')),
+                             **({'route': str(ROUTE)} if ROUTE else {})},
         sim_extra_args=sim_extra_args,
         max_runtime_sec=NAV2_STARTUP_TIMEOUT_SEC + ROUTE_TIMEOUT_SEC + HARNESS_MARGIN_SEC,
     ) as harness:
