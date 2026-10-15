@@ -50,18 +50,14 @@ outputs = ["rosbuild/sim/install"]
 default-environment = "sim"
 depends-on = ["setup"]
 
-# Newton runs in sim-gpu when scripts/sim_pixi_env.sh detects an NVIDIA GPU, else sim;
-# -cpu forces the CPU Warp build.
+# Run by `artefacts run test-nav2-route` (artefacts.yaml), which sets the params and
+# the upload directory. Newton runs in sim-gpu when scripts/sim_pixi_env.sh detects an
+# NVIDIA GPU, else sim; SIM_PIXI_ENV=sim forces the CPU build. launch_testing's pytest
+# plugin (pulled in by Nav2) does not load under pytest 9 and is not used here.
 [tasks.test-nav2-route]
-cmd = "pytest src/nav2_demo/test/test_route.py -vv -s"
+cmd = "pytest -p no:launch_testing --junit-xml=$ARTEFACTS_SCENARIO_UPLOAD_DIR/tests_junit.xml src/nav2_demo/test/test_route.py -vv -s"
 default-environment = "nav-test"
 depends-on = ["build"]
-
-[tasks.test-nav2-route-cpu]
-cmd = "pytest src/nav2_demo/test/test_route.py -vv -s"
-default-environment = "nav-test"
-depends-on = ["build"]
-env = { SIM_PIXI_ENV = "sim" }
 
 # Record a route by clicking in RViz: pixi run record-route --name lab
 [tasks.record-route]
@@ -176,9 +172,6 @@ pytest = ">=9.0.3,<10"
 pyyaml = ">=6.0.3,<7"
 plotly = ">=7.1.0,<8"
 pillow = ">=12,<13"
-
-[feature.test.activation]
-scripts = ["scripts/tests_activation.sh"]
 
 [feature.artefacts.pypi-dependencies]
 artefacts-cli = "*"

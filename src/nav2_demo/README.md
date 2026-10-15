@@ -5,27 +5,14 @@ route's map. Uses
 [artefacts-toolkit-navigation](https://github.com/art-e-fact/artefacts-toolkit-navigation):
 
 - `artefacts-route record` records a route by clicking in RViz on a map.
-  `routes/depot.yaml`, the default here, was recorded that way on Nav2's
-  depot map.
+  `routes/depot.yaml` is one recorded that way on Nav2's depot map.
 - `map_to_world()` raises the map's occupied cells into walls, giving a
   simulator world at the map's coordinates (`format="mjcf"` for this
   simulator). It takes milliseconds, so the test makes it fresh each run.
 - `follow_route()` sends the route to Nav2 and reports whether it was
   completed.
 
-## Run it
-
-```bash
-pixi run test-nav2-route --headless  # Newton (GPU if there is one), no windows
-pixi run test-nav2-route             # with the Newton viewer
-RVIZ=true pixi run test-nav2-route   # ... and Nav2's RViz view (map, costmaps, path, robot)
-ROUTE=routes/lab.yaml pixi run test-nav2-route   # a particular route
-```
-
-The test drives the route recorded last (`artefacts-route record` saves into
-`routes/`), or the bundled depot route when none has been recorded.
-
-## Record your own route
+## Record a route
 
 From the repository root, on one of the maps here (or your own):
 
@@ -36,8 +23,17 @@ pixi run record-route --name lab   # --map <other.yaml> for another map
 This opens RViz with the map. Click **2D Pose Estimate** where the robot
 should start, then **Publish Point** for each waypoint in order; press enter
 in the terminal (or close RViz) to save `routes/lab.yaml`. Keep the points on
-open floor: the Lite3 is 0.56 x 0.30 m and walks at 0.3 m/s. Then
-`pixi run test-nav2-route`.
+open floor: the Lite3 is 0.56 x 0.30 m and walks at 0.3 m/s.
+
+## Run it
+
+```bash
+pixi run -e artefacts artefacts run test-nav2-route
+```
+
+Drives the route recorded last. The params in `artefacts.yaml` pick the viewers
+(`headless`, `rviz` for Nav2's RViz view: map, costmaps, path, robot) and the
+speed (`linear_vel`).
 
 ## Pieces
 
@@ -56,4 +52,4 @@ open floor: the Lite3 is 0.56 x 0.30 m and walks at 0.3 m/s. Then
   asserts on `follow_route()`'s result. The world, the simulator config, the
   route result, a chase-camera and an overhead video, the odom trace as CSV and
   three charts (`test/report.py`: path on the map, speed, per-waypoint figures)
-  are written to `results/` (or Artefacts' upload directory).
+  and `metrics.json` are written for Artefacts to upload.

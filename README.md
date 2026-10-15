@@ -26,39 +26,40 @@ need different ROS versions, so they are built into separate workspaces under
 
 ## Run the demo
 
-```bash
-pixi run test-nav2-route --headless  # Newton, no windows
-pixi run test-nav2-route             # with the Newton viewer
-RVIZ=true pixi run test-nav2-route   # ... and Nav2's RViz view
-pixi run test-nav2-route-cpu         # force the CPU Newton build
-```
-
-This starts the simulator with the Lite3 at the route's start, launches
-rl_deploy and Nav2 on the route's map, drives the route and asserts that the
-robot got round. World, simulator config, route result, two videos (chase and
-overhead), the odom trace as CSV and charts land in `results/`.
-
-### Record your own route
+### 1. Record a route
 
 ```bash
 pixi run record-route --name lab     # on src/nav2_demo/maps/depot.yaml; --map for another
-pixi run test-nav2-route             # drives the route recorded last
-ROUTE=routes/lab.yaml pixi run test-nav2-route   # or a particular one
 ```
 
 RViz opens with the map: **2D Pose Estimate** where the robot should start,
 **Publish Point** for each waypoint, enter in the terminal to save
-`routes/lab.yaml`. See [src/nav2_demo](src/nav2_demo/README.md) for the pieces.
+`routes/lab.yaml`.
 
-## Run with Artefacts
+### 2. Drive it
+
+The test runs through [Artefacts](https://docs.artefacts.com), which passes it
+the scenario params from `artefacts.yaml` and collects what it writes:
 
 ```bash
 pixi run -e artefacts artefacts login   # once; set `project` in artefacts.yaml to yours
 pixi run -e artefacts artefacts run test-nav2-route
+SIM_PIXI_ENV=sim pixi run -e artefacts artefacts run test-nav2-route   # force the CPU Newton build
 ```
+
+This takes the route recorded last, starts the simulator with the Lite3 at
+its start, launches rl_deploy and Nav2 on its map, drives the route once per
+`linear_vel` and asserts that the robot got round. World, simulator config,
+route result, two videos (chase and overhead), the odom trace as CSV, charts
+and metrics are uploaded with each run. The params in `artefacts.yaml`:
+
+- `headless`: `false` shows the Newton viewer; `rviz: true` also opens Nav2's RViz view.
+- `linear_vel`: FollowPath's speed in m/s; a list drives the route once per value.
+
+See [src/nav2_demo](src/nav2_demo/README.md) for the pieces.
 
 ## Layout
 
-- `src/nav2_demo`: the launch file, Nav2 parameters, maps, bundled route and the test.
+- `src/nav2_demo`: the launch file, Nav2 parameters, maps and the test.
 - `src/simulation_package`: the Lite3 in Newton with a 2D lidar, publishing to ROS 2.
 - `src/sdk_deploy` (submodule): DeepRobotics' `rl_deploy`, the locomotion controller that turns `/cmd_vel` into joint commands.
