@@ -6,11 +6,12 @@ offscreen RGB camera that trails the robot base and writes an mp4.
 Frames come from Newton's GL viewer via ``ViewerGL.get_frame`` so the video looks
 like the Newton screen, headless or not (like MuJoCo's EGL recorder):
 
-* ``headless: false``: the interactive window, at its own resolution; its camera
-  is driven to the follow pose while recording. The mp4 is locked to that
-  resolution at start; if the window's framebuffer later changes size (e.g. a
-  macOS Retina backing-scale change when the window moves between displays),
-  later frames are resampled back to the locked size instead of crashing.
+* ``headless: false``: the interactive window, at its own resolution. Each frame
+  is drawn with the viewer's own renderer at the follow pose but never presented,
+  and the user's camera is put back, so the window stays free to orbit. The mp4
+  is locked to the window's resolution at start; if the framebuffer later changes
+  size (e.g. a macOS Retina backing-scale change when the window moves between
+  displays), later frames are resampled back to the locked size instead of crashing.
 * ``headless: true``: a private EGL-backed ``ViewerGL`` at ``width`` x ``height``
   that needs no display server.  The physics loop never sees it, so the CUDA
   graph stays enabled.
@@ -164,21 +165,28 @@ class NewtonFollowCameraRecorder:
             f"({width}x{height} @ {self.fps:.1f} Hz, fov {self.fov_deg:.0f} deg, {source})"
         )
 
-    def render(self, state, refit: bool = True, timestamp: float = 0.0) -> np.ndarray | None:
-        """Render one RGB frame (H, W, 3) uint8 without writing it to the video."""
+    def render(self, state, refit: bool = True, timestamp: float = 0.0,
+               log_state: bool = True) -> np.ndarray | None:
+        """Render one RGB frame (H, W, 3) uint8 without writing it to the video.
+
+        ``log_state=False`` when another camera already logged *state* into the shared viewer.
+        """
         if not self.enabled or self.closed:
             return None
         position, forward, azimuth, elevation = self._camera_pose(state)
 
         if self.viewer is not None:
-            # Drive the interactive camera to the follow pose and grab the GL frame.
-            self.viewer.set_camera(
-                wp.vec3(*position), math.degrees(elevation), math.degrees(azimuth)
-            )
-            self.viewer.begin_frame(timestamp)
-            self.viewer.log_state(state)
-            self.viewer.end_frame()
-            frame = self.viewer.get_frame().numpy()
+            viewer, camera = self.viewer, self.viewer.camera
+            own_view = (wp.vec3(*camera.pos), camera.pitch, camera.yaw)
+            viewer.set_camera(wp.vec3(*position), math.degrees(elevation), math.degrees(azimuth))
+            if log_state:
+                viewer.begin_frame(timestamp)
+                viewer.log_state(state)
+            # The viewer's own draw call without presenting it, so the window (shared
+            # with the user and the other camera) keeps its own camera.
+            viewer.renderer.render(camera, viewer.objects, viewer.lines, viewer.wireframe_shapes, viewer.arrows)
+            frame = viewer.get_frame().numpy()
+            viewer.set_camera(*own_view)
             # Crop to the writer's macro block so odd window sizes are not resampled.
             frame_height, frame_width = frame.shape[:2]
             return np.ascontiguousarray(frame[
@@ -202,9 +210,9 @@ class NewtonFollowCameraRecorder:
         rgba = self.sensor.utils.to_rgba_from_color(self.color_image).numpy()
         return np.ascontiguousarray(rgba[0, :, :, :3])
 
-    def update(self, state, refit: bool = True, timestamp: float = 0.0) -> None:
+    def update(self, state, refit: bool = True, timestamp: float = 0.0, log_state: bool = True) -> None:
         """Render one frame and append it to the video."""
-        frame = self.render(state, refit=refit, timestamp=timestamp)
+        frame = self.render(state, refit=refit, timestamp=timestamp, log_state=log_state)
         if frame is None:
             return
         if frame.shape[:2] != self.frame_size:
