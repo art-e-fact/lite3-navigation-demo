@@ -1,7 +1,7 @@
 import math
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import numpy as np
@@ -12,20 +12,29 @@ import warp as wp
 from newton import JointTargetMode
 from newton.sensors import SensorIMU
 
-from constants import DEFAULT_ROBOT_START_POSE, FREE_JOINT_Q_COUNT, FREE_JOINT_QD_COUNT, LITE3_ROOT_BODY
+from constants import (
+    DEFAULT_ROBOT_START_POSE,
+    FREE_JOINT_ANGVEL,
+    FREE_JOINT_LINVEL,
+    FREE_JOINT_Q_COUNT,
+    FREE_JOINT_QD_COUNT,
+    LITE3_ROOT_BODY,
+)
+from sensors.common.transforms import rotate_world_to_body
 from sensors.newton.lidar_sensor import NewtonLidarSensor
-from simulation_config import MJCF_SUFFIXES
-from utils import log
+from simulation_config import MJCF_SUFFIXES, SensorsConfig
+from utils import POSE_POSITION, POSE_QUATERNION, log
 
 
 DT = 0.004
 ROS_SPIN_EVERY_STEPS = 1
-PUBLISH_EVERY_STEPS = 5
-ODOM_EVERY_STEPS = 20
-DEFAULT_JOINT_POS = np.array(
-    [0.0, -1.35453, 2.54948, 0.0, -1.35453, 2.54948, 0.0, -1.35453, 2.54948, 0.0, -1.35453, 2.54948],
-    dtype=np.float32,
-)
+LEG_COUNT = 4
+# Lite3 standing pose of one leg (hip abduction, hip, knee) [rad]; every leg is the same.
+LITE3_LEG_STANCE_RAD = (0.0, -1.35453, 2.54948)
+# Per-DOF |tau| clamp [Nm], mirrors the MJCF actuator ctrlrange.
+LITE3_EFFORT_LIMIT_NM = 30.0
+# M20 leg: three leg joints and a wheel.
+M20_LEG_EFFORT_LIMIT_NM = (76.4, 76.4, 76.4, 21.6)
 DEFAULT_STIFFNESS = 30.0
 DEFAULT_DAMPING = 1.0
 # Rotor inertia the MJCFs omit. The PD torque is integrated explicitly (host side,
@@ -48,26 +57,22 @@ CONTACT_FRICTION_STIFFNESS = 1.0e3
 CONTACT_FRICTION = 0.75
 # Standard gravity [m/s^2], applied along -Z.
 GRAVITY_MPS2 = 9.81
+# State arrays captured at construction and restored by rewind().
+STATE_ARRAYS = ("joint_q", "joint_qd", "body_q", "body_qd")
 
 # M20 sim-to-policy frame, mirrors mujoco_simulation_ros2.py (DdsInterface::Handler).
 M20_JOINT_DIR = np.array(
     [1, 1, -1, 1, 1, -1, 1, -1, -1, 1, -1, 1, -1, -1, 1, -1],
     dtype=np.float32,
 )
-M20_POS_OFFSET_RAD = (
-    np.array(
-        [-25, -131, 160, 0, 25, -131, 160, 0, -25, 131, -160, 0, 25, 131, -160, 0],
-        dtype=np.float32,
-    )
-    / 180.0
-    * np.pi
-)
+M20_POS_OFFSET_RAD = np.radians(
+    [-25, -131, 160, 0, 25, -131, 160, 0, -25, 131, -160, 0, 25, 131, -160, 0]
+).astype(np.float32)
 
 
 @dataclass(frozen=True)
 class RobotProfile:
     name: str
-    num_dofs: int
     base_height: float
     default_joint_pos: np.ndarray
     effort_limit: np.ndarray  # per-DOF |tau| clamp, mirrors MJCF actuator ctrlrange
@@ -75,25 +80,27 @@ class RobotProfile:
     joint_dir: np.ndarray | None = None  # pub<->raw joint calibration, None = identity
     pos_offset_rad: np.ndarray | None = None
 
+    @property
+    def num_dofs(self) -> int:
+        return len(self.default_joint_pos)
+
 
 ROBOT_PROFILES: dict[str, RobotProfile] = {
     "Lite3": RobotProfile(
         name="Lite3",
-        num_dofs=12,
         base_height=0.43,
-        default_joint_pos=DEFAULT_JOINT_POS,
-        effort_limit=np.full(12, 30.0, dtype=np.float32),
+        default_joint_pos=np.tile(LITE3_LEG_STANCE_RAD, LEG_COUNT).astype(np.float32),
+        effort_limit=np.full(len(LITE3_LEG_STANCE_RAD) * LEG_COUNT, LITE3_EFFORT_LIMIT_NM, dtype=np.float32),
         root_body=LITE3_ROOT_BODY,
     ),
     "M20": RobotProfile(
         name="M20",
-        num_dofs=16,
         base_height=1.0,
         default_joint_pos=np.array(
             [-0.438, -1.16, 2.76, 0, 0.438, -1.16, 2.76, 0, -0.438, 1.16, -2.76, 0, 0.438, 1.16, -2.76, 0],
             dtype=np.float32,
         ),
-        effort_limit=np.array([76.4, 76.4, 76.4, 21.6] * 4, dtype=np.float32),
+        effort_limit=np.tile(M20_LEG_EFFORT_LIMIT_NM, LEG_COUNT).astype(np.float32),
         root_body="base_link",
         joint_dir=M20_JOINT_DIR,
         pos_offset_rad=M20_POS_OFFSET_RAD,
@@ -103,11 +110,33 @@ ROBOT_PROFILES: dict[str, RobotProfile] = {
 
 @dataclass
 class JointCommand:
+    """Per-DOF PD gains, targets and feed-forward torque."""
+
     kp: np.ndarray
     kd: np.ndarray
     position: np.ndarray
     velocity: np.ndarray
     torque: np.ndarray
+
+    @classmethod
+    def standing(cls, profile: RobotProfile) -> "JointCommand":
+        """Fresh arrays holding the robot's standing pose with the default gains."""
+        num_dofs = profile.num_dofs
+        return cls(
+            kp=np.full(num_dofs, DEFAULT_STIFFNESS, dtype=np.float32),
+            kd=np.full(num_dofs, DEFAULT_DAMPING, dtype=np.float32),
+            position=profile.default_joint_pos.copy(),
+            velocity=np.zeros(num_dofs, dtype=np.float32),
+            torque=np.zeros(num_dofs, dtype=np.float32),
+        )
+
+    def copy(self) -> "JointCommand":
+        return JointCommand(**{field.name: getattr(self, field.name).copy() for field in fields(self)})
+
+    def assign(self, other: "JointCommand") -> None:
+        """Copy *other*'s values into this command's arrays in place."""
+        for field in fields(self):
+            getattr(self, field.name)[:] = getattr(other, field.name)
 
 
 @dataclass
@@ -133,31 +162,6 @@ def create_newton_viewer():
         sys.argv = saved_argv
 
 
-def default_joint_command_arrays(profile: RobotProfile):
-    """Fresh (kp, kd, position, velocity, torque) arrays holding the robot's standing pose."""
-    return (
-        np.full(profile.num_dofs, DEFAULT_STIFFNESS, dtype=np.float32),
-        np.full(profile.num_dofs, DEFAULT_DAMPING, dtype=np.float32),
-        profile.default_joint_pos.copy(),
-        np.zeros(profile.num_dofs, dtype=np.float32),
-        np.zeros(profile.num_dofs, dtype=np.float32),
-    )
-
-
-def quat_xyzw_to_rpy(q: np.ndarray) -> np.ndarray:
-    x, y, z, w = q
-    roll = np.arctan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
-    pitch = np.arcsin(np.clip(2.0 * (w * y - z * x), -1.0, 1.0))
-    yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-    return np.array([roll, pitch, yaw], dtype=np.float32)
-
-
-def rotate_world_to_body(quat_xyzw: np.ndarray, vec_world: np.ndarray) -> np.ndarray:
-    x, y, z, w = quat_xyzw
-    q_vec = np.array([x, y, z], dtype=np.float32)
-    return vec_world * (2.0 * w * w - 1.0) - np.cross(q_vec, vec_world) * (2.0 * w) + q_vec * (2.0 * np.dot(q_vec, vec_world))
-
-
 def warp_to_numpy(array, fallback_size: int) -> np.ndarray:
     if array is None:
         return np.zeros(fallback_size, dtype=np.float32)
@@ -178,7 +182,7 @@ class NewtonSimulation:
         headless: bool = True,
         viewer=None,
         logger=None,
-        sensor_options=None,
+        sensor_options: SensorsConfig | None = None,
         profile: RobotProfile | None = None,
         start_pose=None,
     ):
@@ -190,6 +194,9 @@ class NewtonSimulation:
         self.sensor_options = sensor_options
         self.profile = profile if profile is not None else ROBOT_PROFILES["Lite3"]
         self.num_dofs = self.profile.num_dofs
+        # Where the actuated DOFs sit in joint_q / joint_qd, after the free joint.
+        self._dof_q = slice(FREE_JOINT_Q_COUNT, FREE_JOINT_Q_COUNT + self.num_dofs)
+        self._dof_qd = slice(FREE_JOINT_QD_COUNT, FREE_JOINT_QD_COUNT + self.num_dofs)
         self.device = wp.get_device()
         self.timestamp = 0.0
         self.step_count = 0
@@ -199,7 +206,7 @@ class NewtonSimulation:
             # robot.start_pose from the config: fields set there win over the default start.
             self.robot_start_pose = start_pose.apply(self.robot_start_pose)
 
-        self.kp_cmd, self.kd_cmd, self.pos_cmd, self.vel_cmd, self.tau_ff = default_joint_command_arrays(self.profile)
+        self.command = JointCommand.standing(self.profile)
         self.last_tau = np.zeros(self.num_dofs, dtype=np.float32)
 
         self.model, self.solver, self.collision_pipeline, self.state_0, self.state_1, self.control = self._build_newton_model(model_path, scene_path)
@@ -226,15 +233,11 @@ class NewtonSimulation:
         self._log_info("Optional sensors are managed by the ROS runner.")
 
     def set_command(self, command: JointCommand):
-        self.kp_cmd[:] = command.kp
-        self.kd_cmd[:] = command.kd
-        self.pos_cmd[:] = command.position
-        self.vel_cmd[:] = command.velocity
-        self.tau_ff[:] = command.torque
+        self.command.assign(command)
 
     def _capture_state(self) -> dict:
         values = {}
-        for name in ("joint_q", "joint_qd", "body_q", "body_qd"):
+        for name in STATE_ARRAYS:
             array = getattr(self.state_0, name, None)
             if array is not None:
                 values[name] = array.numpy().copy()
@@ -278,21 +281,26 @@ class NewtonSimulation:
         self.viewer.end_frame()
 
     def state_snapshot(self) -> SimulationState:
-        joint_q = warp_to_numpy(self.state_0.joint_q, FREE_JOINT_Q_COUNT + self.num_dofs)
-        joint_qd = warp_to_numpy(self.state_0.joint_qd, FREE_JOINT_QD_COUNT + self.num_dofs)
-        quat_xyzw = joint_q[3:7]
+        joint_q, joint_qd = self._joint_state()
+        quat_xyzw = joint_q[POSE_QUATERNION]
         self.imu.update(self.state_0)
         return SimulationState(
-            position=joint_q[:3],
+            position=joint_q[POSE_POSITION],
             quat_xyzw=quat_xyzw,
-            linvel_body=rotate_world_to_body(quat_xyzw, joint_qd[:3]),
-            angvel_body=rotate_world_to_body(quat_xyzw, joint_qd[3:6]),
-            joint_position=joint_q[FREE_JOINT_Q_COUNT : FREE_JOINT_Q_COUNT + self.num_dofs],
-            joint_velocity=joint_qd[FREE_JOINT_QD_COUNT : FREE_JOINT_QD_COUNT + self.num_dofs],
+            linvel_body=rotate_world_to_body(quat_xyzw, joint_qd[FREE_JOINT_LINVEL]),
+            angvel_body=rotate_world_to_body(quat_xyzw, joint_qd[FREE_JOINT_ANGVEL]),
+            joint_position=joint_q[self._dof_q],
+            joint_velocity=joint_qd[self._dof_qd],
             # .numpy() aliases the sensor's persistent buffer on CPU devices, so copy out.
             imu_acc=self.imu.accelerometer.numpy()[0].copy(),
             imu_gyro=self.imu.gyroscope.numpy()[0].copy(),
         )
+
+    def _joint_state(self) -> tuple[np.ndarray, np.ndarray]:
+        """Host copies of the generalised coordinates and velocities (free joint + DOFs)."""
+        joint_q = warp_to_numpy(self.state_0.joint_q, FREE_JOINT_Q_COUNT + self.num_dofs)
+        joint_qd = warp_to_numpy(self.state_0.joint_qd, FREE_JOINT_QD_COUNT + self.num_dofs)
+        return joint_q, joint_qd
 
     def _setup_cuda_graph(self):
         if not self.device.is_cuda:
@@ -311,6 +319,7 @@ class NewtonSimulation:
             self.graph = None
             self.use_cuda_graph = False
             self._log_warn(f"CUDA graph capture failed; falling back to uncaptured Newton stepping: {exc}")
+
     def _build_newton_model(self, model_path: str, scene_path: str | None = None):
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Lite3 model description not found: {model_path}")
@@ -331,7 +340,7 @@ class NewtonSimulation:
         if Path(model_path).suffix.lower() == ".xml":
             builder.add_mjcf(
                 model_path,
-                xform=wp.transform(wp.vec3(0.0, 0.0, 0.0)),
+                xform=wp.transform_identity(),
                 collapse_fixed_joints=True,
                 enable_self_collisions=False,
                 parse_visuals=True,
@@ -342,7 +351,7 @@ class NewtonSimulation:
         else:
             builder.add_usd(
                 model_path,
-                xform=wp.transform(wp.vec3(0.0, 0.0, 0.0)),
+                xform=wp.transform_identity(),
                 collapse_fixed_joints=True,
                 enable_self_collisions=False,
                 joint_ordering="dfs",
@@ -360,10 +369,10 @@ class NewtonSimulation:
         if not scene_loaded:
             builder.add_ground_plane()
 
-        start_x, start_y, start_yaw = self.robot_start_pose
-        builder.joint_q[:3] = [float(start_x), float(start_y), self.profile.base_height]
-        builder.joint_q[3:7] = [0.0, 0.0, math.sin(0.5 * float(start_yaw)), math.cos(0.5 * float(start_yaw))]
-        builder.joint_q[FREE_JOINT_Q_COUNT : FREE_JOINT_Q_COUNT + self.num_dofs] = self.profile.default_joint_pos.tolist()
+        start_x, start_y, start_yaw = (float(value) for value in self.robot_start_pose)
+        builder.joint_q[POSE_POSITION] = [start_x, start_y, self.profile.base_height]
+        builder.joint_q[POSE_QUATERNION] = [0.0, 0.0, math.sin(0.5 * start_yaw), math.cos(0.5 * start_yaw)]
+        builder.joint_q[self._dof_q] = self.profile.default_joint_pos.tolist()
 
         for dof_index in range(self.num_dofs):
             target_index = FREE_JOINT_QD_COUNT + dof_index
@@ -416,7 +425,7 @@ class NewtonSimulation:
 
         builder.add_mjcf(
             str(scene_file),
-            xform=wp.transform(wp.vec3(0.0, 0.0, 0.0)),
+            xform=wp.transform_identity(),
             collapse_fixed_joints=True,
             enable_self_collisions=False,
             parse_visuals=True,
@@ -427,10 +436,7 @@ class NewtonSimulation:
 
     def _init_sensor_visuals(self, builder):
         options = self.sensor_options
-        if options is None:
-            return
-
-        if getattr(options, "enable_lidar", False):
+        if options is not None and options.lidar_2d.enabled:
             NewtonLidarSensor.init_visuals(builder, options.lidar_2d)
 
     def _simulate_physics_step(self, apply_viewer_forces: bool, keep_state_buffers: bool):
@@ -445,15 +451,17 @@ class NewtonSimulation:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def _apply_control(self):
-        joint_q = warp_to_numpy(self.state_0.joint_q, FREE_JOINT_Q_COUNT + self.num_dofs)
-        joint_qd = warp_to_numpy(self.state_0.joint_qd, FREE_JOINT_QD_COUNT + self.num_dofs)
-        joint_position = joint_q[FREE_JOINT_Q_COUNT : FREE_JOINT_Q_COUNT + self.num_dofs]
-        joint_velocity = joint_qd[FREE_JOINT_QD_COUNT : FREE_JOINT_QD_COUNT + self.num_dofs]
-        tau = self.kp_cmd * (self.pos_cmd - joint_position) + self.kd_cmd * (self.vel_cmd - joint_velocity) + self.tau_ff
+        joint_q, joint_qd = self._joint_state()
+        command = self.command
+        tau = (
+            command.kp * (command.position - joint_q[self._dof_q])
+            + command.kd * (command.velocity - joint_qd[self._dof_qd])
+            + command.torque
+        )
         limit = self.profile.effort_limit
         self.last_tau = np.clip(tau, -limit, limit)
 
-        self._joint_f_buffer[FREE_JOINT_QD_COUNT : FREE_JOINT_QD_COUNT + self.num_dofs] = self.last_tau
+        self._joint_f_buffer[self._dof_qd] = self.last_tau
         self.control.joint_f.assign(self._joint_f_buffer)
 
     def _log_info(self, message: str):

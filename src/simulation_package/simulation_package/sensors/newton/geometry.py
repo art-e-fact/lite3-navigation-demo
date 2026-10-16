@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation as R_scipy
 
 from constants import BASE_FRAME
 from sensors.common.transforms import make_transform, quat_from_matrix
+from utils import label_text, split_pose
 
 try:
     from newton._src.utils.selection import match_labels
@@ -15,18 +16,15 @@ except Exception:  # Newton's helper location is stable in 1.2, but keep imports
     match_labels = None
 
 
-def _label_text(value) -> str:
-    return value.decode() if isinstance(value, bytes) else str(value)
-
-
-def _find_label_index(labels, label: str, kind: str) -> int:
+def find_label_index(labels, label: str, kind: str) -> int:
+    """Index of *label* in a Newton label list, matching the full path or its tail."""
     if match_labels is not None:
         matches = match_labels(labels, label)
         if matches:
             return int(matches[0])
 
     for index, value in enumerate(labels):
-        text = _label_text(value)
+        text = label_text(value)
         if text == label or text.endswith(label):
             return index
     raise ValueError(f"Newton {kind} '{label}' was not found")
@@ -34,25 +32,23 @@ def _find_label_index(labels, label: str, kind: str) -> int:
 
 def find_site_index(model, label: str) -> int:
     labels = list(model.shape_label) if getattr(model, "shape_label", None) is not None else []
-    return _find_label_index(labels, label, "site")
+    return find_label_index(labels, label, "site")
+
+
+def find_body_index(model, label: str) -> int:
+    return find_label_index(list(model.body_label), label, "body")
 
 
 def find_builder_shape_index(builder, label: str) -> int:
-    return _find_label_index(builder.shape_label, label, "shape")
-
-
-def transform_expand(transform_value) -> tuple[np.ndarray, np.ndarray]:
-    values = np.asarray(transform_value, dtype=np.float64)
-    return values[:3].copy(), values[3:7].copy()
+    return find_label_index(builder.shape_label, label, "shape")
 
 
 def site_world_pose(model, state, site_index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     body_index = int(model.shape_body.numpy()[site_index])
-    shape_transform = model.shape_transform.numpy()[site_index]
-    site_local_pos, site_local_quat = transform_expand(shape_transform)
+    site_local_pos, site_local_quat = split_pose(model.shape_transform.numpy()[site_index])
 
     if body_index >= 0:
-        body_pos, body_quat = transform_expand(state.body_q.numpy()[body_index])
+        body_pos, body_quat = split_pose(state.body_q.numpy()[body_index])
         body_rot = R_scipy.from_quat(body_quat).as_matrix()
         site_pos = body_pos + body_rot @ site_local_pos
         site_rot = body_rot @ R_scipy.from_quat(site_local_quat).as_matrix()
@@ -64,7 +60,7 @@ def site_world_pose(model, state, site_index: int) -> tuple[np.ndarray, np.ndarr
 
 
 def site_local_pose(model, site_index: int) -> tuple[np.ndarray, np.ndarray]:
-    site_local_pos, site_local_quat = transform_expand(model.shape_transform.numpy()[site_index])
+    site_local_pos, site_local_quat = split_pose(model.shape_transform.numpy()[site_index])
     return site_local_pos, R_scipy.from_quat(site_local_quat).as_matrix()
 
 
@@ -75,7 +71,7 @@ def site_static_transform(stamp, model, site_index: int, child_frame: str, paren
 
 
 def warp_transform(position: np.ndarray, rotation_matrix: np.ndarray):
-    quat_xyzw = R_scipy.from_matrix(rotation_matrix).as_quat()
+    quat_xyzw = quat_from_matrix(rotation_matrix)
     return wp.transformf(
         wp.vec3f(float(position[0]), float(position[1]), float(position[2])),
         wp.quat(float(quat_xyzw[0]), float(quat_xyzw[1]), float(quat_xyzw[2]), float(quat_xyzw[3])),

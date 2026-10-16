@@ -32,18 +32,13 @@ HF_URI_PREFIX = "hf://"
 HF_URI_PREFIXES = (HF_URI_PREFIX, "https://huggingface.co/", "https://hf.co/")
 HF_DOWNLOADABLE_REPO_TYPES = {"model", "dataset", "space"}
 
-ROBOT_PRESETS: dict[str, dict[str, str | float]] = {
-	"lite3": {
-		"name": "Lite3",
-		"robot_description": DEFAULT_ROBOT_DESCRIPTION_URI,
-		"base_height": 0.43,
-	},
-	"m20": {
-		"name": "M20",
-		"robot_description": M20_ROBOT_DESCRIPTION_URI,
-		"base_height": 1.0,
-	},
+# robot.model -> display name (the key into simulation.ROBOT_PROFILES) and description URI.
+ROBOT_PRESETS: dict[str, dict[str, str]] = {
+	"lite3": {"name": "Lite3", "robot_description": DEFAULT_ROBOT_DESCRIPTION_URI},
+	"m20": {"name": "M20", "robot_description": M20_ROBOT_DESCRIPTION_URI},
 }
+# FollowCameraConfig fields that must be positive.
+CAMERA_POSITIVE_FIELDS = ("fps", "width", "height", "distance_m", "target_height_m", "quality", "fov_deg")
 
 
 @dataclass
@@ -128,7 +123,7 @@ class RobotConfig:
 	state_frequency_hz: float = 50.0
 	start_pose: StartPoseConfig = field(default_factory=StartPoseConfig)
 
-	def preset(self) -> dict[str, str | float]:
+	def preset(self) -> dict[str, str]:
 		key = self.model.strip().lower()
 		if key not in ROBOT_PRESETS:
 			raise ValueError(f"Unknown robot.model '{self.model}', expected one of: {', '.join(sorted(ROBOT_PRESETS))}")
@@ -218,69 +213,58 @@ class SimulationConfig:
 		for name, camera in (("follow_camera", sensors.follow_camera), ("overhead_camera", sensors.overhead_camera)):
 			if camera.enabled and not str(camera.video_path).strip():
 				errors.append(f"sensors.{name}.video_path must be set when camera recording is enabled")
-			_validate_positive(errors, f"sensors.{name}.fps", camera.fps)
-			_validate_positive(errors, f"sensors.{name}.width", camera.width)
-			_validate_positive(errors, f"sensors.{name}.height", camera.height)
-			_validate_positive(errors, f"sensors.{name}.distance_m", camera.distance_m)
-			_validate_positive(errors, f"sensors.{name}.target_height_m", camera.target_height_m)
-			_validate_positive(errors, f"sensors.{name}.quality", camera.quality)
-			_validate_positive(errors, f"sensors.{name}.fov_deg", camera.fov_deg)
+			for field_name in CAMERA_POSITIVE_FIELDS:
+				_validate_positive(errors, f"sensors.{name}.{field_name}", getattr(camera, field_name))
 			_validate_unit_interval(errors, f"sensors.{name}.smoothing", camera.smoothing)
 
 		return errors
 
+
+def load_validated_config(config_path: str | None, overrides: dict[str, Any] | None = None) -> SimulationConfig:
+	"""Load *config_path* (or the defaults), apply dotted *overrides*, exit on validation errors."""
+	config = SimulationConfig.load(config_path).with_overrides(overrides or {})
+	errors = config.validate()
+	if errors:
+		raise SystemExit("Invalid simulation config:\n- " + "\n- ".join(errors))
+	return config
+
+
 def candidate_package_roots() -> list[Path]:
 	roots: list[Path] = []
-	seen: set[Path] = set()
 
 	if get_package_share_directory is not None:
 		for package_name in (PACKAGE_NAME, LEGACY_PACKAGE_NAME):
 			try:
-				package_root = Path(get_package_share_directory(package_name)).resolve()
-				if package_root not in seen:
-					roots.append(package_root)
-					seen.add(package_root)
+				roots.append(Path(get_package_share_directory(package_name)).resolve())
 			except Exception:
 				pass
 
 	for parent in Path(__file__).resolve().parents:
-		candidates = (
-			parent,
-			parent / "share" / PACKAGE_NAME,
-			parent / "share" / LEGACY_PACKAGE_NAME,
-		)
-		for candidate in candidates:
+		for candidate in (parent, parent / "share" / PACKAGE_NAME, parent / "share" / LEGACY_PACKAGE_NAME):
 			resolved = candidate.resolve()
-			if resolved in seen:
-				continue
-			if (
-				(resolved / ASSETS_DIR_NAME).exists()
-				or (resolved / "Lite3_description").exists()
-				or (resolved / "config").exists()
-			):
+			if any((resolved / marker).exists() for marker in (ASSETS_DIR_NAME, "Lite3_description", "config")):
 				roots.append(resolved)
-				seen.add(resolved)
 	if not roots:
+		# simulation_package/simulation_package/simulation_config.py -> the package source root's parent.
 		roots.append(Path(__file__).resolve().parents[3])
-	return roots
+	return list(dict.fromkeys(roots))  # first occurrence wins, order kept
 
 
 def _resource_search_roots() -> list[Path]:
-	bases: list[Path] = []
-	seen: set[Path] = set()
-	for root in candidate_package_roots():
-		for base in (
-			root,
-			root / ASSETS_DIR_NAME,
-			root / "Lite3_description",
-			root / "config",
-		):
-			resolved = base.resolve()
-			if resolved in seen:
-				continue
-			bases.append(resolved)
-			seen.add(resolved)
-	return bases
+	bases = [
+		(root / sub_dir).resolve()
+		for root in candidate_package_roots()
+		for sub_dir in ("", ASSETS_DIR_NAME, "Lite3_description", "config")
+	]
+	return list(dict.fromkeys(bases))
+
+
+def _first_existing(candidates: list[Path], must_exist: bool) -> Path | None:
+	"""The first candidate that exists, else the first candidate unless *must_exist*."""
+	for candidate in candidates:
+		if candidate.exists():
+			return candidate
+	return None if must_exist or not candidates else candidates[0]
 
 
 @lru_cache(maxsize=None)
@@ -331,37 +315,22 @@ def resolve_path(path_value: str | os.PathLike[str], must_exist: bool = False) -
 			raise ValueError(
 				f"Unsupported package URI '{raw}', expected package://{PACKAGE_NAME}/..."
 			)
-		rel_path = Path(rel)
-		fallback = None
-		for root in _resource_search_roots():
-			candidate = (root / rel_path).resolve()
-			if candidate.exists():
-				return candidate
-			if fallback is None:
-				fallback = candidate
-		if fallback is not None and not must_exist:
-			return fallback
+		found = _first_existing([(root / rel).resolve() for root in _resource_search_roots()], must_exist)
+		if found is not None:
+			return found
 
 	candidate = Path(raw).expanduser()
-	if candidate.is_absolute():
+	if candidate.is_absolute() or candidate.exists():
 		return candidate.resolve()
-	if candidate.exists():
-		return candidate.resolve()
-	fallback = None
-	for root in _resource_search_roots():
-		for base in (
-			root,
-			root / "lite3_mjcf" / "mjcf",
-			root / "m20_mjcf" / "mjcf",
-		):
-			resolved = (base / candidate).resolve()
-			if resolved.exists():
-				return resolved
-			if fallback is None:
-				fallback = resolved
-	if fallback is not None and not must_exist:
-		return fallback
-	return candidate.resolve()
+	found = _first_existing(
+		[
+			(root / sub_dir / candidate).resolve()
+			for root in _resource_search_roots()
+			for sub_dir in ("", Path("lite3_mjcf") / "mjcf", Path("m20_mjcf") / "mjcf")
+		],
+		must_exist,
+	)
+	return found if found is not None else candidate.resolve()
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

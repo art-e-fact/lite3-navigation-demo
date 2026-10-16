@@ -1,14 +1,11 @@
-"""Shared LiDAR constants and ray pattern helpers."""
+"""Shared LiDAR ray pattern helpers; sensor settings live in simulation_config."""
 
 import math
 import numpy as np
 
-# Sensor settings (sites, frames, topics, ranges) live in simulation_config; these are
-# only the fallbacks for callers that build a sensor without a config.
-NUM_RAYS = 360
 
-
-def planar_lidar_dirs(num_rays: int = NUM_RAYS) -> np.ndarray:
+def planar_lidar_dirs(num_rays: int) -> np.ndarray:
+    """Unit ray directions in the sensor's XY plane, evenly spaced from -pi to pi."""
     angles = np.linspace(-math.pi, math.pi, num_rays, endpoint=False)
     return np.column_stack((
         np.cos(angles),

@@ -25,7 +25,7 @@ from sim_control_harness import SimControlHarness, StopReason
 
 PARAMS = get_artefacts_params()  # this scenario's params from artefacts.yaml
 OUTPUT_FOLDER = Path(os.environ['ARTEFACTS_SCENARIO_UPLOAD_DIR'])  # uploaded with the run
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[3]  # test/ -> nav2_demo/ -> src/ -> repo
 SIM_PACKAGE_ROOT = REPO_ROOT / 'src' / 'simulation_package'
 METRICS = REPO_ROOT / 'metrics.json'  # artefacts.yaml's `metrics:`, read from where `artefacts run` runs
 METRIC_DECIMALS = 3
