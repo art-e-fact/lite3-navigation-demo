@@ -15,8 +15,8 @@ __pycache__/
 
 imgui.ini
 
-# test outputs and routes recorded with `artefacts-route record`
-results/
+# routes recorded with `artefacts-route record`, and the test's metrics
 routes/
 !src/nav2_demo/routes/
 metrics.json
+results/
