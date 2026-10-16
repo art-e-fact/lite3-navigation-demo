@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 
 import argparse
+import math
 import signal
 import sys
 import time
 from pathlib import Path
 
+import warp as wp
+
 CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
-SIMULATION_DIR = CURRENT_DIR.parent
-if str(SIMULATION_DIR) not in sys.path:
-    sys.path.insert(0, str(SIMULATION_DIR))
+# Sibling modules import each other by bare name, from either the source tree or the install.
+for directory in (CURRENT_DIR, CURRENT_DIR.parent):
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
 
 import rclpy
 
 from rerun_recorder import NewtonRerunRecorder
 from ros_bridge import NewtonRosBridge
-from simulation import DT, ROS_SPIN_EVERY_STEPS, ROBOT_PROFILES, NewtonSimulation, create_newton_viewer
-from sensors.newton.sensor_manager import NewtonSensorManager, NewtonSensorOptions
-from simulation_config import SimulationConfig
-from utils import step_interval
+from simulation import DT, ROS_SPIN_EVERY_STEPS, ROBOT_PROFILES, NewtonSimulation, RobotProfile, create_newton_viewer
+from sensors.newton.geometry import find_body_index
+from sensors.newton.sensor_manager import NewtonSensorManager
+from simulation_config import SimulationConfig, load_validated_config
+from utils import log, step_interval
 
 RENDER_EVERY_STEPS = 5
 
@@ -39,18 +42,15 @@ def _aim_viewer_at_robot(viewer, sim: NewtonSimulation):
     set_camera = getattr(viewer, "set_camera", None)
     if set_camera is None:
         return
-    import math
 
-    import warp as wp
-
-    x, y, yaw = sim.robot_start_pose
-    pos = wp.vec3(
-        float(x) - VIEWER_CAMERA_DISTANCE_M * math.cos(yaw),
-        float(y) - VIEWER_CAMERA_DISTANCE_M * math.sin(yaw),
+    start_x, start_y, start_yaw = sim.robot_start_pose
+    camera_pos = wp.vec3(
+        float(start_x) - VIEWER_CAMERA_DISTANCE_M * math.cos(start_yaw),
+        float(start_y) - VIEWER_CAMERA_DISTANCE_M * math.sin(start_yaw),
         sim.profile.base_height + VIEWER_CAMERA_HEIGHT_M,
     )
-    pitch = -math.degrees(math.atan2(VIEWER_CAMERA_HEIGHT_M, VIEWER_CAMERA_DISTANCE_M))
-    set_camera(pos, pitch, math.degrees(yaw))
+    pitch_deg = -math.degrees(math.atan2(VIEWER_CAMERA_HEIGHT_M, VIEWER_CAMERA_DISTANCE_M))
+    set_camera(camera_pos, pitch_deg, math.degrees(start_yaw))
 
 
 def warm_up(sim: NewtonSimulation, sensors: NewtonSensorManager | None, recorder: NewtonRerunRecorder | None):
@@ -96,7 +96,6 @@ def run_loop(
         sim.step()
         ros.publish_clock(sim.timestamp)
 
-        state = None
         if sim.step_count % state_every_steps == 0:
             state = sim.state_snapshot()
             ros.publish_state(sim.timestamp, state, sim.last_tau)
@@ -116,18 +115,18 @@ def run_loop(
             sim.render()
 
 
-def _robot_body_index(sim: NewtonSimulation, profile) -> int:
+def _robot_body_index(sim: NewtonSimulation, profile: RobotProfile) -> int:
     """Index of the robot's root body in ``state.body_q``.
 
     The robot is added to the builder first, so body 0 is its root; the label check
     keeps that assumption honest if the build order ever changes.
     """
-    for index, label in enumerate(sim.model.body_label):
-        if str(label).rsplit("/", 1)[-1] == profile.root_body:
-            return index
-    if sim.logger is not None:
-        sim.logger.warn(f"Root body '{profile.root_body}' not found in the Newton model; using body 0")
-    return 0
+    try:
+        return find_body_index(sim.model, profile.root_body)
+    except ValueError:
+        log(sim.logger, "warn", f"Root body '{profile.root_body}' not found in the Newton model; using body 0",
+            tag_logger=False)
+        return 0
 
 
 def run_newton(config: SimulationConfig, ros_args: list[str] | None = None):
@@ -139,18 +138,13 @@ def run_newton(config: SimulationConfig, ros_args: list[str] | None = None):
         raise SystemExit(f"No Newton robot profile for '{config.robot.model_name}'")
     viewer = None if config.headless else create_newton_viewer()
     ros = NewtonRosBridge(headless=config.headless, model_path=model_path, profile=profile)
-    sensor_options = NewtonSensorOptions(
-        lidar_2d=config.sensors.lidar_2d,
-        follow_camera=config.sensors.follow_camera,
-        overhead_camera=config.sensors.overhead_camera,
-    )
     sim = NewtonSimulation(
         model_path=model_path,
         scene_path=scene_path,
         headless=config.headless,
         viewer=viewer,
         logger=ros.get_logger(),
-        sensor_options=sensor_options,
+        sensor_options=config.sensors,
         profile=profile,
         start_pose=config.robot.start_pose,
     )
@@ -172,7 +166,7 @@ def run_newton(config: SimulationConfig, ros_args: list[str] | None = None):
         sim.state_0,
         ros.node,
         DT,
-        sensor_options,
+        config.sensors,
         robot_body_index=_robot_body_index(sim, profile),
         viewer=viewer,
     )
@@ -181,10 +175,10 @@ def run_newton(config: SimulationConfig, ros_args: list[str] | None = None):
 
     try:
         warmup_sec = warm_up(sim, sensors, recorder)
-        ros.get_logger().info(f"[INFO] Newton warm-up finished in {warmup_sec:.1f} s; publishing /clock")
+        log(ros.node, "info", f"Newton warm-up finished in {warmup_sec:.1f} s; publishing /clock")
         run_loop(sim, ros, state_every_steps, sensors, recorder)
     except KeyboardInterrupt:
-        ros.get_logger().info("[INFO] Newton simulation interrupted; shutting down")
+        log(ros.node, "info", "Newton simulation interrupted; shutting down")
     finally:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         if recorder is not None:
@@ -202,12 +196,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run Lite3 Newton ROS2 simulation")
     parser.add_argument("--config", default=None, help="Path to simulation YAML config")
     args, ros_args = parser.parse_known_args()
-
-    config = SimulationConfig.load(args.config).with_overrides({"simulator": "newton"})
-    errors = config.validate()
-    if errors:
-        raise SystemExit("Invalid simulation config:\n- " + "\n- ".join(errors))
-    run_newton(config, ros_args)
+    run_newton(load_validated_config(args.config, {"simulator": "newton"}), ros_args)
 
 
 if __name__ == "__main__":

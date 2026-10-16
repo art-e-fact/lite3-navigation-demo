@@ -1,16 +1,19 @@
 # Reference only. This file is not loaded by the simulator.
-# Runtime defaults live in interface/robot/simulation/simulation_config.py.
+# Runtime defaults live in simulation_package/simulation_config.py; every key here is at its default.
 
 simulator: newton
 
-# Scene XML/MJCF for the environment.
-scene: package://lite3_sdk_deploy/Lite3_description/lite3_mjcf/mjcf/stairs_floors.xml
-
-# Robot description.
-robot_description: package://lite3_sdk_deploy/Lite3_description/lite3_mjcf/mjcf/Lite3.xml
+# Scene XML/MJCF for the environment. Empty for a bare ground plane.
+scene: package://simulation_package/assets/lite3_mjcf/mjcf/stairs_floors.xml
 
 # Run without a viewer by default.
 headless: true
+
+robot:
+  model: lite3  # lite3 or m20; picks the robot description
+  state_frequency_hz: 50.0
+  # Spawn pose in the scene's frame (metres, yaw in radians); unset fields keep the default start.
+  start_pose: {x: null, y: null, yaw: null}
 
 sensors:
   lidar_2d:
@@ -36,6 +39,7 @@ sensors:
     target_height_m: 0.55
     smoothing: 0.08
     quality: 8
+    fov_deg: 45.0
     follow_yaw: true
 
   # A second video with the same options, e.g. a top-down view that keeps the map's heading.
@@ -50,3 +54,4 @@ rerun:
   enabled: false
   spawn: true
   save_path: ''
+  close_viewer_on_exit: false

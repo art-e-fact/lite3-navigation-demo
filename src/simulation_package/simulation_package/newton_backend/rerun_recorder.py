@@ -22,7 +22,7 @@ import rerun as rr
 
 import newton
 
-from utils import log
+from utils import label_short_name, log, split_pose
 
 # Rerun implicit-frame prefix; see rerun_loader_mjcf.__init__ for the rationale.
 _TF = "tf#"
@@ -43,11 +43,9 @@ RERUN_FLUSH_TIMEOUT_SEC = 10.0
 
 _RGBA_MAX = 255
 _DEFAULT_COLOR = (0.6, 0.6, 0.6)
-
-
-def _last_segment(label: str) -> str:
-    text = label.decode() if isinstance(label, bytes) else str(label)
-    return text.rsplit("/", 1)[-1] or text
+# A box logged as 6 quads with hard edges: 4 vertices per face, 2 triangles per face.
+_BOX_FACE_COUNT = 6
+_VERTICES_PER_FACE = 4
 
 
 def _deduplicate(names: list[str]) -> list[str]:
@@ -91,9 +89,12 @@ def _box_mesh(hx: float, hy: float, hz: float):
         dtype=np.float32,
     )
     face_normals = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
-    normals = np.repeat(face_normals, 4, axis=0).astype(np.float32)
+    normals = np.repeat(face_normals, _VERTICES_PER_FACE, axis=0).astype(np.float32)
     faces = np.array(
-        [[i * 4 + 0, i * 4 + 1, i * 4 + 2, i * 4 + 0, i * 4 + 2, i * 4 + 3] for i in range(6)],
+        [
+            [first + 0, first + 1, first + 2, first + 0, first + 2, first + 3]
+            for first in range(0, _BOX_FACE_COUNT * _VERTICES_PER_FACE, _VERTICES_PER_FACE)
+        ],
         dtype=np.int32,
     ).reshape(-1, 3)
     return vertices, faces, normals
@@ -135,7 +136,7 @@ class NewtonRerunRecorder:
         self.logger = logger
         self.closed = False
 
-        self.body_names = _deduplicate([_last_segment(label) for label in list(model.body_label)])
+        self.body_names = _deduplicate([label_short_name(label) for label in list(model.body_label)])
         self._body_index = {name: index for index, name in enumerate(self.body_names)}
         self._world_name = WORLD_BODY_NAME
         while self._world_name in self._body_index:
@@ -265,12 +266,11 @@ class NewtonRerunRecorder:
     # -- geometry -----------------------------------------------------------
 
     def _log_body_transforms(self, state) -> None:
-        body_q = np.asarray(state.body_q.numpy(), dtype=np.float64)
+        body_q = state.body_q.numpy()
         for index, name in enumerate(self.body_names):
-            rr.log(
-                self.body_path(name),
-                rr.Transform3D(translation=body_q[index, 0:3], quaternion=body_q[index, 3:7]),
-            )
+            # Newton stores body_q quaternions as xyzw, same as Rerun.
+            translation, quaternion = split_pose(body_q[index])
+            rr.log(self.body_path(name), rr.Transform3D(translation=translation, quaternion=quaternion))
 
     def _log_shapes(self) -> None:
         model = self.model
@@ -307,7 +307,7 @@ class NewtonRerunRecorder:
             body_name = self._world_name if body < 0 else self.body_names[body]
             frame = self.body_frame(body_name)
             shapes = visual.get(body) or collision.get(body) or []
-            names = _deduplicate([_last_segment(shape_labels[shape]) for shape in shapes])
+            names = _deduplicate([label_short_name(shape_labels[shape]) for shape in shapes])
             for shape, shape_name in zip(shapes, names):
                 path = f"{VISUAL_ROOT}/{body_name}/{shape_name}"
                 color = _rgba_uint8(shape_color[shape] if shape_color is not None else _DEFAULT_COLOR)
@@ -326,15 +326,9 @@ class NewtonRerunRecorder:
 
     def _log_geom_with_frame(self, path, frame, geo_type, scale, transform, source, color) -> None:
         rr.log(path, rr.CoordinateFrame(frame), static=True)
-        rr.log(
-            path,
-            rr.InstancePoses3D(
-                translations=[np.asarray(transform[0:3], dtype=np.float64)],
-                # Newton shape transforms are xyzw, matching Rerun.
-                quaternions=[np.asarray(transform[3:7], dtype=np.float64)],
-            ),
-            static=True,
-        )
+        # Newton shape transforms are xyzw, matching Rerun.
+        translation, quaternion = split_pose(transform)
+        rr.log(path, rr.InstancePoses3D(translations=[translation], quaternions=[quaternion]), static=True)
         self._log_geom(path, geo_type, scale, source, color)
 
     def _log_geom(self, path, geo_type, scale, source, color) -> None:
@@ -382,59 +376,28 @@ class NewtonRerunRecorder:
             self._log_mesh(path, vertices, faces, normals, color)
             return
 
-        if geo_type == newton.GeoType.SPHERE:
-            radius = float(scale[0])
-            rr.log(
-                path,
-                rr.Ellipsoids3D(
-                    half_sizes=[radius, radius, radius],
-                    colors=color,
-                    fill_mode=rr.components.FillMode.Solid,
-                ),
-                static=True,
-            )
+        solid = dict(colors=color, fill_mode=rr.components.FillMode.Solid)
+        if geo_type in (newton.GeoType.SPHERE, newton.GeoType.ELLIPSOID):
+            # shape_scale = (radius, radius, radius) for a sphere, the three semi-axes otherwise.
+            half_sizes = [float(scale[0])] * 3 if geo_type == newton.GeoType.SPHERE else scale[:3].tolist()
+            rr.log(path, rr.Ellipsoids3D(half_sizes=half_sizes, **solid), static=True)
             return
 
-        if geo_type == newton.GeoType.ELLIPSOID:
-            rr.log(
-                path,
-                rr.Ellipsoids3D(
-                    half_sizes=[float(scale[0]), float(scale[1]), float(scale[2])],
-                    colors=color,
-                    fill_mode=rr.components.FillMode.Solid,
-                ),
-                static=True,
-            )
-            return
-
+        # shape_scale = (radius, half_height, radius); Newton capsules and cylinders run along Z.
+        radius, half_height = float(scale[0]), float(scale[1])
         if geo_type == newton.GeoType.CAPSULE:
-            # shape_scale = (radius, half_height, radius); Newton capsules run along Z.
-            radius, half_height = float(scale[0]), float(scale[1])
             rr.log(
                 path,
-                rr.Capsules3D(
-                    lengths=2.0 * half_height,
-                    radii=radius,
-                    translations=[[0.0, 0.0, -half_height]],
-                    colors=color,
-                    fill_mode=rr.components.FillMode.Solid,
-                ),
+                rr.Capsules3D(lengths=2.0 * half_height, radii=radius, translations=[[0.0, 0.0, -half_height]], **solid),
                 static=True,
             )
             return
 
         if geo_type in (newton.GeoType.CYLINDER, newton.GeoType.CONE):
             # Rerun has no cone archetype; a cylinder is a reasonable stand-in.
-            radius, half_height = float(scale[0]), float(scale[1])
             rr.log(
                 path,
-                rr.Cylinders3D(
-                    lengths=2.0 * half_height,
-                    radii=radius,
-                    centers=[[0.0, 0.0, 0.0]],
-                    colors=color,
-                    fill_mode=rr.components.FillMode.Solid,
-                ),
+                rr.Cylinders3D(lengths=2.0 * half_height, radii=radius, centers=[[0.0, 0.0, 0.0]], **solid),
                 static=True,
             )
             return

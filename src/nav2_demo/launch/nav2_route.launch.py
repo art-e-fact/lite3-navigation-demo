@@ -41,17 +41,16 @@ def launch_setup(context, *args, **kwargs):
                                     param_rewrites={'controller_server.ros__parameters.FollowPath.desired_linear_vel': linear_vel})
 
     # Only the map is taken from the route here: the robot is spawned at the
-    # route's start by the simulator (robot.start_pose in its config).
-    nav2_args = route_launch_args(route, map_arg='map')
-    # The route records the map path as given when recording, relative to the
-    # repository root; Nav2's map server wants it absolute.
-    nav2_args['map'] = os.path.abspath(nav2_args['map'])
-    nav2_args.update({
+    # route's start by the simulator (robot.start_pose in its config). The route
+    # records the map path as given when recording, relative to the repository
+    # root; Nav2's map server wants it absolute.
+    bringup_args = {
+        'map': os.path.abspath(route_launch_args(route, map_arg='map')['map']),
         'params_file': params_file,
         'use_sim_time': 'True',
         'autostart': 'True',
         'use_composition': 'False',
-    })
+    }
     nav2_share = get_package_share_directory('nav2_bringup')
 
     actions = [
@@ -68,8 +67,7 @@ def launch_setup(context, *args, **kwargs):
         # only ever see real scans.
         TimerAction(period=float(nav2_delay), actions=[IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(nav2_share, 'launch', 'bringup_launch.py')),
-            launch_arguments={key: value for key, value in nav2_args.items()
-                              if key in ('map', 'params_file', 'use_sim_time', 'autostart', 'use_composition')}.items(),
+            launch_arguments=bringup_args.items(),
         )]),
     ]
     if use_rviz:
