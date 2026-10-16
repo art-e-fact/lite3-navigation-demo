@@ -1,9 +1,12 @@
 """Nav2 on a recorded route's map, plus the quadruped's /cmd_vel interface.
 
 The nav side of the demo, launched by test/test_route.py once the simulator
-(which runs in its own pixi environment) is up:
+is up:
 
-    ros2 launch nav2_demo nav2_route.launch.py route:=routes/lab.yaml
+    python $(which ros2) launch nav2_demo nav2_route.launch.py route:=routes/lab.yaml
+
+(`python`, not plain `ros2`: ros2's shebang is the system interpreter, and this
+file imports artefacts_toolkit_navigation from the venv.)
 
 The route (recorded with `artefacts-route record`) names the map, so Nav2's
 map server, AMCL and the navigation stack come up on it. rl_deploy turns

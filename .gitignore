@@ -1,17 +1,13 @@
 build/
 install/
 log/
-rosbuild/
+.venv/
 .vscode/
 __pycache__/
 *.pyc
 .pytest_cache/
 .python-version
 .DS_Store
-
-# pixi environments
-.pixi/*
-!.pixi/config.toml
 
 imgui.ini
 

@@ -1,0 +1,20 @@
+# On top of ROS 2 Jazzy (apt): python3 -m venv --system-site-packages .venv
+# Simulator: Newton. The warp-lang wheel runs on an NVIDIA GPU when a driver is present, else on CPU.
+newton[sim]>=1.6   # the MuJoCo solver needs mujoco-warp
+trimesh>=4.12
+imageio>=2.37
+imageio-ffmpeg>=0.6
+scipy>=1.17
+pyglm>=2.8.3
+pyglet
+huggingface_hub>=1.29
+perlin-noise>=1.14
+rerun-sdk[catalog]>=0.37
+# Route recording/driving, world extrusion, the test and its report
+artefacts-toolkit-navigation>=0.2.1
+artefacts-toolkit>=1.1
+artefacts-cli
+pytest>=9
+pyyaml>=6
+plotly>=7.1
+pillow>=12

@@ -4,8 +4,10 @@ import atexit
 import enum
 import math
 import os
+import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -232,7 +234,6 @@ class SimControlHarness:
         odom_topic: str = '/odom',
         clock_topic: str = '/clock',
         max_odom_step_m: float = 1.0,
-        sim_pixi_env: str | None = None,
         sim_ready_timeout_sec: float = 180.0,
         sim_extra_args: list[str] | None = None,
     ):
@@ -258,11 +259,6 @@ class SimControlHarness:
         self._domain_id = (
             domain_id if domain_id is not None else str(DOMAIN_ID_BASE + (os.getpid() % DOMAIN_ID_SPAN))
         )
-        self._sim_pixi_env = sim_pixi_env or subprocess.run(
-            ['scripts/sim_pixi_env.sh'],
-            cwd=str(self._repo_root),
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
         self._max_runtime_sec = max_runtime_sec
         self._sim_timeout_sec = sim_timeout_sec
         self._stall_timeout_sec = stall_timeout_sec
@@ -323,17 +319,13 @@ class SimControlHarness:
         if _INITIAL_RERUN_VIEWER_PIDS is None:
             _INITIAL_RERUN_VIEWER_PIDS = set(self._rerun_viewers_before)
 
-        pixi_exe = os.environ.get('PIXI_EXE', 'pixi')
         sim_pythonpath = os.pathsep.join(
             path for path in [str(self._sim_package_root), os.environ.get('PYTHONPATH', '')] if path
         )
-        sim_python = 'python'
         self._context = rclpy.context.Context()
         rclpy.init(context=self._context)
         self._node = rclpy.create_node('sim_control_harness', context=self._context)
-        self._node.get_logger().info(
-            f'Launching simulator with pixi env: {self._sim_pixi_env}'
-        )
+        self._node.get_logger().info('Launching simulator')
         self._executor = SingleThreadedExecutor(context=self._context)
         self._executor.add_node(self._node)
 
@@ -344,8 +336,7 @@ class SimControlHarness:
         self._sim_log_path = self._log_dir / 'sim.log'
         self._sim_proc, self._sim_log_file = _start_process(
             cmd=[
-                pixi_exe, 'run', '-e', self._sim_pixi_env,
-                sim_python, '-m', 'simulation_package.start_simulation',
+                sys.executable, '-m', 'simulation_package.start_simulation',
                 '--config', str(self._config_path),
                 *self._sim_extra_args,
             ],
@@ -360,7 +351,8 @@ class SimControlHarness:
         self._control_log_path = self._log_dir / 'control.log'
         self._control_proc, self._control_log_file = _start_process(
             cmd=(
-                ['ros2', 'launch', self._control_package, self._control_launch_file]
+                # ros2's shebang is the system python; the launch file imports from the venv.
+                [sys.executable, shutil.which('ros2'), 'launch', self._control_package, self._control_launch_file]
                 + [f'{name}:={value}' for name, value in self._control_launch_args.items()]
             ),
             log_path=self._control_log_path,

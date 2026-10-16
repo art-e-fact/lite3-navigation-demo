@@ -5,31 +5,37 @@ in a simulated world extruded from the route's map, using
 [artefacts-toolkit-navigation](https://github.com/art-e-fact/artefacts-toolkit-navigation).
 
 Split out of [lite3-ros-demos](https://github.com/art-e-fact/lite3-ros-demos).
-Tested on Linux (x64); the simulator also runs on macOS (arm64).
 
 ## Requirements
 
-* Linux (tested on Ubuntu 24.04) or macOS
-* [pixi](https://pixi.prefix.dev/latest/installation/)
-* Optional: an NVIDIA GPU with CUDA 12 drivers. Newton runs on it when one is found
-  (`scripts/sim_pixi_env.sh`); on CPU it runs well below real time.
+* Ubuntu 24.04 with [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)
+  (`ros-jazzy-ros-base` is enough; rosdep installs the rest), `python3-colcon-common-extensions`,
+  `python3-rosdep`
+* Optional: an NVIDIA GPU. Newton uses it when a driver is found; on CPU it runs
+  well below real time.
 
 ## Build
 
 ```bash
-pixi run build
+git submodule update --init --recursive
+source /opt/ros/jazzy/setup.bash
+rosdep install --from-paths src --ignore-src -y --skip-keys "rail_inspector simple_local_heightmap"
+python3 -m venv --system-site-packages .venv && source .venv/bin/activate
+pip install -r requirements.txt
+colcon build --symlink-install
+source install/setup.bash
 ```
 
-The simulator (Newton, ROS 2 Kilted) and the Nav2 side (ROS 2 Jazzy)
-need different ROS versions, so they are built into separate workspaces under
-`rosbuild/` and run as separate processes. Delete `rosbuild/` for a clean build.
+The two skipped keys are stale entries in the sdk_deploy submodule's manifest.
+Every later shell needs the three `source` lines. (`uv venv --system-site-packages`
+and `uv pip install -r requirements.txt` work too.)
 
 ## Run the demo
 
 ### 1. Record a route
 
 ```bash
-pixi run record-route --name lab     # on src/nav2_demo/maps/depot.yaml; --map for another
+artefacts-route record --name lab --map src/nav2_demo/maps/depot.yaml
 ```
 
 RViz opens with the map: **2D Pose Estimate** where the robot should start,
@@ -42,9 +48,8 @@ The test runs through [Artefacts](https://docs.artefacts.com), which passes it
 the scenario params from `artefacts.yaml` and collects what it writes:
 
 ```bash
-pixi run -e artefacts artefacts login   # once; set `project` in artefacts.yaml to yours
-pixi run -e artefacts artefacts run test-nav2-route
-SIM_PIXI_ENV=sim pixi run -e artefacts artefacts run test-nav2-route   # force the CPU Newton build
+artefacts login   # once; set `project` in artefacts.yaml to yours
+artefacts run test-nav2-route
 ```
 
 This takes the route recorded last, starts the simulator with the Lite3 at

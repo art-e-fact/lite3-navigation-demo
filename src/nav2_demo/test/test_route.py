@@ -1,14 +1,14 @@
 """Drive a recorded route with Nav2 on the Lite3, in a world extruded from the
 route's map, and check that the robot got round.
 
-    pixi run -e artefacts artefacts run test-nav2-route
+    artefacts run test-nav2-route
 
 Runs under `artefacts run` only: it reads the scenario's params from artefacts.yaml
 (headless, rviz, linear_vel; a list drives the route once per value) and writes
 everything into the run's upload directory. It drives the route recorded last with
-`pixi run record-route`. The simulator (Newton) runs in its own pixi environment
-with the robot spawned at the route's start; Nav2 and rl_deploy run from this
-environment via nav2_route.launch.py; the test itself drives the route with
+`artefacts-route record`. The simulator (Newton) runs as a subprocess
+with the robot spawned at the route's start; Nav2 and rl_deploy are launched
+via nav2_route.launch.py; the test itself drives the route with
 artefacts_toolkit_navigation.follow_route().
 """
 

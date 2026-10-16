@@ -22,4 +22,4 @@ jobs:
           linear_vel: [0.2, 0.3, 0.4]  # m/s, one run per value (velocity_smoother caps at 0.4)
       settings:
         - name: test_route_is_completed
-          run: "pixi run -e nav-test test-nav2-route"
+          pytest_file: src/nav2_demo/test/test_route.py
