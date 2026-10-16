@@ -1,18 +1,11 @@
 # lite3-navigation-demo
 
-Nav2 drives the DeepRobotics Lite3 quadruped along a route recorded in RViz,
-in a simulated world extruded from the route's map, using
-[artefacts-toolkit-navigation](https://github.com/art-e-fact/artefacts-toolkit-navigation).
-
-Split out of [lite3-ros-demos](https://github.com/art-e-fact/lite3-ros-demos).
+This demo showcases [artefacts-toolkit-navigation](https://github.com/art-e-fact/artefacts-toolkit-navigation), running the DeepRobotics Lite3 through an automatically generated scene (based on a rviz map), with a user recorded route.
 
 ## Requirements
 
-* Ubuntu 24.04 with [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)
-  (`ros-jazzy-ros-base` is enough; rosdep installs the rest), `python3-colcon-common-extensions`,
-  `python3-rosdep`
-* Optional: an NVIDIA GPU. Newton uses it when a driver is found; on CPU it runs
-  well below real time.
+* ROS 2 Jazzy.
+* Optional: an NVIDIA GPU which Newton will use if found.
 
 ## Build
 
@@ -25,27 +18,23 @@ pip install -r requirements.txt
 colcon build --symlink-install
 source install/setup.bash
 ```
-
-The two skipped keys are stale entries in the sdk_deploy submodule's manifest.
-Every later shell needs the three `source` lines. (`uv venv --system-site-packages`
-and `uv pip install -r requirements.txt` work too.)
+_Note_ `rail_inspector` and `simple_local_heightmap` are part of the `artefacts` fork of the Deep Robotics `sdk_deploy`. They are unused in this demo and so can be skipped.
 
 ## Run the demo
 
 ### 1. Record a route
 
 ```bash
-artefacts-route record --name lab --map src/nav2_demo/maps/depot.yaml
+artefacts-route record --map src/nav2_demo/maps/depot.yaml
 ```
 
 RViz opens with the map: **2D Pose Estimate** where the robot should start,
-**Publish Point** for each waypoint, enter in the terminal to save
-`routes/lab.yaml`.
+**Publish Point** for each waypoint, enter in the terminal to save it as a
+timestamped file under `routes/`.
 
 ### 2. Drive it
 
-The test runs through [Artefacts](https://docs.artefacts.com), which passes it
-the scenario params from `artefacts.yaml` and collects what it writes:
+The test runs through [Artefacts](https://docs.artefacts.com).
 
 ```bash
 artefacts login   # once; set `project` in artefacts.yaml to yours
