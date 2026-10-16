@@ -39,6 +39,7 @@ OVERHEAD_ELEVATION_DEG = -89.0  # not -90: looking straight down leaves the came
 OVERHEAD_DISTANCE_M = 10.0
 OVERHEAD_SMOOTHING = 0.03  # per-frame blend towards the robot (0..1); low keeps the top-down view steady
 MAX_FINAL_ERROR_M = 0.5  # how close to the last waypoint counts as arrived
+VIDEO_FPS = 10.0  # each camera frame costs ~7 ms of wall time (the viewer re-uploads every wall shape)
 
 
 def test_route_is_completed(tmp_path):
@@ -60,10 +61,10 @@ def test_route_is_completed(tmp_path):
             # camera, steeper than the default 18 deg so the 1 m walls do not hide the
             # robot, and a top-down view that keeps the map's heading.
             'follow_camera': {'enabled': True, 'video_path': str(OUTPUT_FOLDER / f'{route.name}_follow.mp4'),
-                              'elevation_deg': FOLLOW_ELEVATION_DEG},
+                              'elevation_deg': FOLLOW_ELEVATION_DEG, 'fps': VIDEO_FPS},
             'overhead_camera': {'enabled': True, 'video_path': str(OUTPUT_FOLDER / f'{route.name}_overhead.mp4'),
                                 'elevation_deg': OVERHEAD_ELEVATION_DEG, 'follow_yaw': False, 'distance_m': OVERHEAD_DISTANCE_M,
-                                'smoothing': OVERHEAD_SMOOTHING},
+                                'smoothing': OVERHEAD_SMOOTHING, 'fps': VIDEO_FPS},
         },
         'rerun': {'enabled': False},
     }

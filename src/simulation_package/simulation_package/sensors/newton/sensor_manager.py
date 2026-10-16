@@ -59,14 +59,14 @@ class NewtonSensorManager:
             viewer=viewer,
             bvh=None,  # assigned below once the shared BVH exists
         )
-        # Never the interactive window: that one is the follow camera's. This camera
-        # renders off its own offscreen viewer (or the raytracer without GL).
+        # Shares the follow camera's viewer (the window, or its hidden EGL one): both
+        # render off-screen without presenting, so one GL context serves both videos.
         self.overhead_camera = NewtonFollowCameraRecorder(
             model,
             node,
             config=options.overhead_camera,
             robot_body_index=robot_body_index,
-            viewer=None,
+            viewer=self.follow_camera.viewer,
             bvh=None,
         )
         self.cameras = [
@@ -102,8 +102,14 @@ class NewtonSensorManager:
         self.bvh.refit(state)
         if due_lidar:
             self.lidar.update(state, timestamp)
+        # Cameras sharing a viewer log the state into it once: that upload (one per
+        # distinct shape size in the world, every frame) is most of a frame's cost.
+        logged_viewers = set()
         for camera in due_cameras:
-            camera.update(state, refit=False, timestamp=timestamp)
+            viewer = camera.viewer
+            camera.update(state, refit=False, timestamp=timestamp,
+                          log_state=viewer is None or id(viewer) not in logged_viewers)
+            logged_viewers.add(id(viewer))
 
     def warmup(self, state, timestamp: float = 0.0):
         """Render every enabled sensor once so their Warp kernels are compiled.
