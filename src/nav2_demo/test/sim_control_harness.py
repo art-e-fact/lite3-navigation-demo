@@ -4,12 +4,14 @@ import atexit
 import enum
 import math
 import os
+import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import rclpy
 import rclpy.context
@@ -32,9 +34,21 @@ ODOM_QUEUE_DEPTH = 20  # odom is the fastest topic, so it gets the deepest queue
 CLOCK_QUEUE_DEPTH = 10
 PLAN_QUEUE_DEPTH = 10
 GOAL_ROUND_DIGITS = 1  # plans are keyed by goal rounded to 0.1 m (see _plans)
+NANOSECONDS_PER_SECOND = 1e9
+# Signals sent to a process group in turn, each with how long to wait for the exit.
+STOP_SIGNALS = ((signal.SIGINT, STOP_TIMEOUT_SEC), (signal.SIGTERM, KILL_TIMEOUT_SEC), (signal.SIGKILL, KILL_TIMEOUT_SEC))
 
-_PROCESS_GROUPS: set[int] = set()
-_PROCESS_GROUP_IDS: dict[int, int] = {}
+_PROCESS_GROUP_IDS: dict[int, int] = {}  # pid -> pgid of every process this module started
+
+
+class TraceSample(NamedTuple):
+    """One /odom message, as the reports consume it."""
+
+    sim_time_s: float
+    x_m: float
+    y_m: float
+    yaw_rad: float
+    speed_mps: float
 
 
 class StopReason(enum.Enum):
@@ -56,8 +70,19 @@ def _killpg(pgid: int, signum: int) -> None:
         pass
 
 
+def _kill(pid: int, signum: int) -> None:
+    try:
+        os.kill(pid, signum)
+    except ProcessLookupError:
+        pass
+
+
+def _stamp_to_sec(stamp) -> float:
+    return float(stamp.sec) + float(stamp.nanosec) / NANOSECONDS_PER_SECOND
+
+
 def _cleanup_process_groups() -> None:
-    for pgid in list(_PROCESS_GROUPS):
+    for pgid in set(_PROCESS_GROUP_IDS.values()):
         _killpg(pgid, signal.SIGKILL)
     if _INITIAL_RERUN_VIEWER_PIDS is not None:
         _terminate_rerun_viewers(_rerun_viewer_pids() - _INITIAL_RERUN_VIEWER_PIDS)
@@ -123,19 +148,13 @@ def _terminate_rerun_viewers(pids: set[int]) -> None:
     if not pids:
         return
     for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        _kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + VIEWER_STOP_TIMEOUT_SEC
     while time.monotonic() < deadline and any(_pid_alive(pid) for pid in pids):
         time.sleep(VIEWER_POLL_SEC)
     for pid in pids:
         if _pid_alive(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            _kill(pid, signal.SIGKILL)
 
 
 def _tail(path: Path, lines: int = LOG_TAIL_LINES) -> str:
@@ -168,9 +187,7 @@ def _start_process(
         cwd=cwd,
         start_new_session=True,
     )
-    pgid = os.getpgid(process.pid)
-    _PROCESS_GROUPS.add(pgid)
-    _PROCESS_GROUP_IDS[process.pid] = pgid
+    _PROCESS_GROUP_IDS[process.pid] = os.getpgid(process.pid)
     return process, log_file
 
 
@@ -182,25 +199,22 @@ def _stop_process(process, log_file) -> None:
         except ProcessLookupError:
             pgid = None
     try:
-        if pgid is not None:
-            _killpg(pgid, signal.SIGINT)
-        if process.poll() is None:
+        # Escalate SIGINT -> SIGTERM -> SIGKILL, waiting after each; the last wait may raise.
+        for signum, timeout_sec in STOP_SIGNALS:
+            if pgid is not None:
+                _killpg(pgid, signum)
+            if process.poll() is not None:
+                break
             try:
-                process.wait(timeout=STOP_TIMEOUT_SEC)
+                process.wait(timeout=timeout_sec)
+                break
             except subprocess.TimeoutExpired:
-                if pgid is not None:
-                    _killpg(pgid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=KILL_TIMEOUT_SEC)
-                except subprocess.TimeoutExpired:
-                    if pgid is not None:
-                        _killpg(pgid, signal.SIGKILL)
-                    process.wait(timeout=KILL_TIMEOUT_SEC)
+                if signum == signal.SIGKILL:
+                    raise
         if pgid is not None:
-            _killpg(pgid, signal.SIGKILL)
+            _killpg(pgid, signal.SIGKILL)  # any children left in the group
     finally:
         if pgid is not None and process.poll() is not None:
-            _PROCESS_GROUPS.discard(pgid)
             _PROCESS_GROUP_IDS.pop(process.pid, None)
         log_file.close()
 
@@ -232,7 +246,6 @@ class SimControlHarness:
         odom_topic: str = '/odom',
         clock_topic: str = '/clock',
         max_odom_step_m: float = 1.0,
-        sim_pixi_env: str | None = None,
         sim_ready_timeout_sec: float = 180.0,
         sim_extra_args: list[str] | None = None,
     ):
@@ -258,11 +271,6 @@ class SimControlHarness:
         self._domain_id = (
             domain_id if domain_id is not None else str(DOMAIN_ID_BASE + (os.getpid() % DOMAIN_ID_SPAN))
         )
-        self._sim_pixi_env = sim_pixi_env or subprocess.run(
-            ['scripts/sim_pixi_env.sh'],
-            cwd=str(self._repo_root),
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
         self._max_runtime_sec = max_runtime_sec
         self._sim_timeout_sec = sim_timeout_sec
         self._stall_timeout_sec = stall_timeout_sec
@@ -288,8 +296,7 @@ class SimControlHarness:
 
         self._total_distance_m = 0.0
         self._message_count = 0
-        # (sim time s, x m, y m, yaw rad, speed m/s) per odom message, for reports.
-        self._trace: list[tuple[float, float, float, float, float]] = []
+        self._trace: list[TraceSample] = []  # one per odom message, for reports
         # Nav2's first plan for each goal, keyed by the goal (x, y) rounded to 0.1 m:
         # the planner republishes every cycle from wherever the robot is, so later
         # plans for the same goal are not the route it meant to drive.
@@ -323,17 +330,13 @@ class SimControlHarness:
         if _INITIAL_RERUN_VIEWER_PIDS is None:
             _INITIAL_RERUN_VIEWER_PIDS = set(self._rerun_viewers_before)
 
-        pixi_exe = os.environ.get('PIXI_EXE', 'pixi')
         sim_pythonpath = os.pathsep.join(
             path for path in [str(self._sim_package_root), os.environ.get('PYTHONPATH', '')] if path
         )
-        sim_python = 'python'
         self._context = rclpy.context.Context()
         rclpy.init(context=self._context)
         self._node = rclpy.create_node('sim_control_harness', context=self._context)
-        self._node.get_logger().info(
-            f'Launching simulator with pixi env: {self._sim_pixi_env}'
-        )
+        self._node.get_logger().info('Launching simulator')
         self._executor = SingleThreadedExecutor(context=self._context)
         self._executor.add_node(self._node)
 
@@ -344,8 +347,7 @@ class SimControlHarness:
         self._sim_log_path = self._log_dir / 'sim.log'
         self._sim_proc, self._sim_log_file = _start_process(
             cmd=[
-                pixi_exe, 'run', '-e', self._sim_pixi_env,
-                sim_python, '-m', 'simulation_package.start_simulation',
+                sys.executable, '-m', 'simulation_package.start_simulation',
                 '--config', str(self._config_path),
                 *self._sim_extra_args,
             ],
@@ -360,7 +362,8 @@ class SimControlHarness:
         self._control_log_path = self._log_dir / 'control.log'
         self._control_proc, self._control_log_file = _start_process(
             cmd=(
-                ['ros2', 'launch', self._control_package, self._control_launch_file]
+                # ros2's shebang is the system python; the launch file imports from the venv.
+                [sys.executable, shutil.which('ros2'), 'launch', self._control_package, self._control_launch_file]
                 + [f'{name}:={value}' for name, value in self._control_launch_args.items()]
             ),
             log_path=self._control_log_path,
@@ -395,23 +398,25 @@ class SimControlHarness:
         )
 
     def _odom_callback(self, msg: Odometry) -> None:
-        x = float(msg.pose.pose.position.x)
-        y = float(msg.pose.pose.position.y)
-        q = msg.pose.pose.orientation
-        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        position = msg.pose.pose.position
+        orientation = msg.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+            1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z),
+        )
         speed = math.hypot(msg.twist.twist.linear.x, msg.twist.twist.linear.y)
-        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        sample = TraceSample(_stamp_to_sec(msg.header.stamp), float(position.x), float(position.y), yaw, speed)
         now = time.monotonic()
         with self._lock:
             self._message_count += 1
-            self._trace.append((stamp, x, y, yaw, speed))
-            self._last_xy = (x, y)
+            self._trace.append(sample)
+            self._last_xy = (sample.x_m, sample.y_m)
             if self._first_odom_wall_time is None:
                 self._first_odom_wall_time = now
-            prev = self._previous_xy
-            self._previous_xy = (x, y)
-            if prev is not None:
-                step_m = math.hypot(x - prev[0], y - prev[1])
+            previous_xy = self._previous_xy
+            self._previous_xy = self._last_xy
+            if previous_xy is not None:
+                step_m = math.hypot(sample.x_m - previous_xy[0], sample.y_m - previous_xy[1])
                 if step_m <= self._max_odom_step_m:
                     self._total_distance_m += step_m
                     if step_m >= self._stall_min_step_m:
@@ -426,7 +431,7 @@ class SimControlHarness:
                                    [(pose.pose.position.x, pose.pose.position.y) for pose in msg.poses])
 
     def _clock_callback(self, msg: Clock) -> None:
-        stamp_sec = float(msg.clock.sec) + float(msg.clock.nanosec) * 1e-9
+        stamp_sec = _stamp_to_sec(msg.clock)
         now = time.monotonic()
         with self._lock:
             if self._first_clock_sec is None:
@@ -435,59 +440,40 @@ class SimControlHarness:
             self._last_clock_sec = stamp_sec
             self._last_clock_wall_time = now
 
+    def _request_stop(self, reason: StopReason) -> None:
+        """Record *reason* (the first one wins) and tell the spin loop to stop."""
+        with self._lock:
+            if self._stop_reason is None:
+                self._stop_reason = reason
+        self._stop_event.set()
+
+    def _stop_reason_due(self) -> 'StopReason | None':
+        """The deadline or process-exit condition met right now, if any."""
+        now = time.monotonic()
+        if self._wall_start is not None and now - self._wall_start >= self._max_runtime_sec:
+            return StopReason.TIMEOUT
+        if self._sim_timeout_sec is not None and self.elapsed_sim_sec >= self._sim_timeout_sec:
+            return StopReason.SIM_TIMEOUT
+        if self._stall_timeout_sec is not None:
+            with self._lock:
+                first_odom_time = self._first_odom_wall_time
+                last_moved = self._last_moved_wall_time
+            if first_odom_time is not None:
+                reference = last_moved if last_moved is not None else first_odom_time
+                if now - reference >= self._stall_timeout_sec:
+                    return StopReason.STALLED
+        if self._sim_proc is not None and self._sim_proc.poll() is not None:
+            return StopReason.SIM_EXITED
+        if self._control_proc is not None and self._control_proc.poll() is not None:
+            return StopReason.CONTROL_EXITED
+        return None
+
     def _spin_loop(self) -> None:
         while not self._stop_event.is_set():
-            # Wall-clock safety deadline
-            if self._wall_start is not None:
-                if (time.monotonic() - self._wall_start) >= self._max_runtime_sec:
-                    with self._lock:
-                        if self._stop_reason is None:
-                            self._stop_reason = StopReason.TIMEOUT
-                    self._stop_event.set()
-                    break
-
-            # Sim-time deadline (from /clock)
-            if self._sim_timeout_sec is not None:
-                with self._lock:
-                    first = self._first_clock_sec
-                    last = self._last_clock_sec
-                if first is not None and last is not None:
-                    if (last - first) >= self._sim_timeout_sec:
-                        with self._lock:
-                            if self._stop_reason is None:
-                                self._stop_reason = StopReason.SIM_TIMEOUT
-                        self._stop_event.set()
-                        break
-
-            # Stall detection: bail if no movement since first odom message
-            if self._stall_timeout_sec is not None:
-                with self._lock:
-                    first_odom_time = self._first_odom_wall_time
-                    last_moved = self._last_moved_wall_time
-                if first_odom_time is not None:
-                    ref = last_moved if last_moved is not None else first_odom_time
-                    if (time.monotonic() - ref) >= self._stall_timeout_sec:
-                        with self._lock:
-                            if self._stop_reason is None:
-                                self._stop_reason = StopReason.STALLED
-                        self._stop_event.set()
-                        break
-
-            # Process health checks
-            if self._sim_proc is not None and self._sim_proc.poll() is not None:
-                with self._lock:
-                    if self._stop_reason is None:
-                        self._stop_reason = StopReason.SIM_EXITED
-                self._stop_event.set()
+            reason = self._stop_reason_due()
+            if reason is not None:
+                self._request_stop(reason)
                 break
-
-            if self._control_proc is not None and self._control_proc.poll() is not None:
-                with self._lock:
-                    if self._stop_reason is None:
-                        self._stop_reason = StopReason.CONTROL_EXITED
-                self._stop_event.set()
-                break
-
             self._executor.spin_once(timeout_sec=SPIN_TIMEOUT_SEC)
 
     def wait(
@@ -502,10 +488,7 @@ class SimControlHarness:
         deadline = time.monotonic() + timeout if timeout is not None else None
         while True:
             if predicate is not None and predicate():
-                with self._lock:
-                    if self._stop_reason is None:
-                        self._stop_reason = StopReason.PREDICATE
-                self._stop_event.set()
+                self._request_stop(StopReason.PREDICATE)
                 return StopReason.PREDICATE
             if self._stop_event.is_set():
                 return self.stop_reason
@@ -536,9 +519,7 @@ class SimControlHarness:
             os.environ.pop('ROS_DOMAIN_ID', None)
         else:
             os.environ['ROS_DOMAIN_ID'] = self._previous_domain_id
-        with self._lock:
-            if self._stop_reason is None:
-                self._stop_reason = StopReason.STOPPED
+        self._request_stop(StopReason.STOPPED)
 
     def _log_real_time_factor(self) -> None:
         """Report sim seconds per wall second between the first and last ``/clock``."""
@@ -597,8 +578,8 @@ class SimControlHarness:
             return self._last_xy
 
     @property
-    def trace(self) -> list[tuple[float, float, float, float, float]]:
-        """Every odom sample so far as (sim time s, x m, y m, yaw rad, speed m/s)."""
+    def trace(self) -> list[TraceSample]:
+        """Every odom sample so far."""
         with self._lock:
             return list(self._trace)
 

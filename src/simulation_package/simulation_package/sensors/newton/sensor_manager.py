@@ -1,30 +1,13 @@
 """Orchestrates Newton sensors at their own publish rates."""
 
-from dataclasses import dataclass, field
-
 from tf2_ros import StaticTransformBroadcaster
 
 from sensors.common.transforms import sim_time_stamp
-from simulation_config import FollowCameraConfig, Lidar2DConfig
+from simulation_config import SensorsConfig
 from sensors.newton.bvh import NewtonBvh
 from sensors.newton.follow_camera_recorder import NewtonFollowCameraRecorder
 from sensors.newton.lidar_sensor import NewtonLidarSensor
 from utils import step_interval
-
-
-@dataclass
-class NewtonSensorOptions:
-    lidar_2d: Lidar2DConfig = field(default_factory=Lidar2DConfig)
-    follow_camera: FollowCameraConfig = field(default_factory=FollowCameraConfig)
-    overhead_camera: FollowCameraConfig = field(default_factory=FollowCameraConfig)
-
-    @property
-    def enable_lidar(self) -> bool:
-        return self.lidar_2d.enabled
-
-    @property
-    def enable_follow_camera(self) -> bool:
-        return self.follow_camera.enabled or self.overhead_camera.enabled
 
 
 class NewtonSensorManager:
@@ -40,7 +23,7 @@ class NewtonSensorManager:
         state,
         node,
         dt: float,
-        options: NewtonSensorOptions,
+        options: SensorsConfig,
         robot_body_index: int = 0,
         viewer=None,
     ):
@@ -48,7 +31,7 @@ class NewtonSensorManager:
         self.node = node
         self.static_tf_broadcaster = StaticTransformBroadcaster(node)
 
-        self.lidar = NewtonLidarSensor(model, node, config=options.lidar_2d)
+        self.lidar = NewtonLidarSensor(model, node, options.lidar_2d)
         # The follow camera raytraces the same BVH as the lidar, so it belongs in the
         # same due-list rather than owning a second refit.
         self.follow_camera = NewtonFollowCameraRecorder(
@@ -59,14 +42,14 @@ class NewtonSensorManager:
             viewer=viewer,
             bvh=None,  # assigned below once the shared BVH exists
         )
-        # Never the interactive window: that one is the follow camera's. This camera
-        # renders off its own offscreen viewer (or the raytracer without GL).
+        # Shares the follow camera's viewer (the window, or its hidden EGL one): both
+        # render off-screen without presenting, so one GL context serves both videos.
         self.overhead_camera = NewtonFollowCameraRecorder(
             model,
             node,
             config=options.overhead_camera,
             robot_body_index=robot_body_index,
-            viewer=None,
+            viewer=self.follow_camera.viewer,
             bvh=None,
         )
         self.cameras = [
@@ -83,10 +66,7 @@ class NewtonSensorManager:
 
     @property
     def enabled(self) -> bool:
-        return (
-            self.lidar.enabled
-            or any(camera.enabled for camera, _ in self.cameras)
-        )
+        return self.lidar.enabled or any(camera.enabled for camera, _ in self.cameras)
 
     def update(self, state, step_count: int, timestamp: float):
         if not self.enabled:
@@ -102,8 +82,14 @@ class NewtonSensorManager:
         self.bvh.refit(state)
         if due_lidar:
             self.lidar.update(state, timestamp)
+        # Cameras sharing a viewer log the state into it once: that upload (one per
+        # distinct shape size in the world, every frame) is most of a frame's cost.
+        logged_viewers = set()
         for camera in due_cameras:
-            camera.update(state, refit=False, timestamp=timestamp)
+            viewer = camera.viewer
+            camera.update(state, refit=False, timestamp=timestamp,
+                          log_state=viewer is None or id(viewer) not in logged_viewers)
+            logged_viewers.add(id(viewer))
 
     def warmup(self, state, timestamp: float = 0.0):
         """Render every enabled sensor once so their Warp kernels are compiled.
@@ -133,8 +119,6 @@ class NewtonSensorManager:
     def _publish_static_transforms(self):
         # Sim time, like every other message the simulator publishes: the nav stack runs
         # with use_sim_time and cannot match a wall-clock TF against sim-clock data.
-        stamp = sim_time_stamp(0.0)
-        transforms = []
-        transforms.extend(self.lidar.get_static_transforms(stamp))
+        transforms = self.lidar.get_static_transforms(sim_time_stamp(0.0))
         if transforms:
             self.static_tf_broadcaster.sendTransform(transforms)

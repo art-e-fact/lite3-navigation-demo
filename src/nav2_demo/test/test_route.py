@@ -1,14 +1,14 @@
 """Drive a recorded route with Nav2 on the Lite3, in a world extruded from the
 route's map, and check that the robot got round.
 
-    pixi run -e artefacts artefacts run test-nav2-route
+    artefacts run test-nav2-route
 
 Runs under `artefacts run` only: it reads the scenario's params from artefacts.yaml
 (headless, rviz, linear_vel; a list drives the route once per value) and writes
 everything into the run's upload directory. It drives the route recorded last with
-`pixi run record-route`. The simulator (Newton) runs in its own pixi environment
-with the robot spawned at the route's start; Nav2 and rl_deploy run from this
-environment via nav2_route.launch.py; the test itself drives the route with
+`artefacts-route record`. The simulator (Newton) runs as a subprocess
+with the robot spawned at the route's start; Nav2 and rl_deploy are launched
+via nav2_route.launch.py; the test itself drives the route with
 artefacts_toolkit_navigation.follow_route().
 """
 
@@ -25,7 +25,7 @@ from sim_control_harness import SimControlHarness, StopReason
 
 PARAMS = get_artefacts_params()  # this scenario's params from artefacts.yaml
 OUTPUT_FOLDER = Path(os.environ['ARTEFACTS_SCENARIO_UPLOAD_DIR'])  # uploaded with the run
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[3]  # test/ -> nav2_demo/ -> src/ -> repo
 SIM_PACKAGE_ROOT = REPO_ROOT / 'src' / 'simulation_package'
 METRICS = REPO_ROOT / 'metrics.json'  # artefacts.yaml's `metrics:`, read from where `artefacts run` runs
 METRIC_DECIMALS = 3
@@ -39,6 +39,7 @@ OVERHEAD_ELEVATION_DEG = -89.0  # not -90: looking straight down leaves the came
 OVERHEAD_DISTANCE_M = 10.0
 OVERHEAD_SMOOTHING = 0.03  # per-frame blend towards the robot (0..1); low keeps the top-down view steady
 MAX_FINAL_ERROR_M = 0.5  # how close to the last waypoint counts as arrived
+VIDEO_FPS = 10.0  # each camera frame costs ~7 ms of wall time (the viewer re-uploads every wall shape)
 
 
 def test_route_is_completed(tmp_path):
@@ -60,10 +61,10 @@ def test_route_is_completed(tmp_path):
             # camera, steeper than the default 18 deg so the 1 m walls do not hide the
             # robot, and a top-down view that keeps the map's heading.
             'follow_camera': {'enabled': True, 'video_path': str(OUTPUT_FOLDER / f'{route.name}_follow.mp4'),
-                              'elevation_deg': FOLLOW_ELEVATION_DEG},
+                              'elevation_deg': FOLLOW_ELEVATION_DEG, 'fps': VIDEO_FPS},
             'overhead_camera': {'enabled': True, 'video_path': str(OUTPUT_FOLDER / f'{route.name}_overhead.mp4'),
                                 'elevation_deg': OVERHEAD_ELEVATION_DEG, 'follow_yaw': False, 'distance_m': OVERHEAD_DISTANCE_M,
-                                'smoothing': OVERHEAD_SMOOTHING},
+                                'smoothing': OVERHEAD_SMOOTHING, 'fps': VIDEO_FPS},
         },
         'rerun': {'enabled': False},
     }

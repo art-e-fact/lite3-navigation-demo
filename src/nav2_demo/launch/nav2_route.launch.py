@@ -1,9 +1,12 @@
 """Nav2 on a recorded route's map, plus the quadruped's /cmd_vel interface.
 
 The nav side of the demo, launched by test/test_route.py once the simulator
-(which runs in its own pixi environment) is up:
+is up:
 
-    ros2 launch nav2_demo nav2_route.launch.py route:=routes/lab.yaml
+    python $(which ros2) launch nav2_demo nav2_route.launch.py route:=routes/lab.yaml
+
+(`python`, not plain `ros2`: ros2's shebang is the system interpreter, and this
+file imports artefacts_toolkit_navigation from the venv.)
 
 The route (recorded with `artefacts-route record`) names the map, so Nav2's
 map server, AMCL and the navigation stack come up on it. rl_deploy turns
@@ -38,17 +41,16 @@ def launch_setup(context, *args, **kwargs):
                                     param_rewrites={'controller_server.ros__parameters.FollowPath.desired_linear_vel': linear_vel})
 
     # Only the map is taken from the route here: the robot is spawned at the
-    # route's start by the simulator (robot.start_pose in its config).
-    nav2_args = route_launch_args(route, map_arg='map')
-    # The route records the map path as given when recording, relative to the
-    # repository root; Nav2's map server wants it absolute.
-    nav2_args['map'] = os.path.abspath(nav2_args['map'])
-    nav2_args.update({
+    # route's start by the simulator (robot.start_pose in its config). The route
+    # records the map path as given when recording, relative to the repository
+    # root; Nav2's map server wants it absolute.
+    bringup_args = {
+        'map': os.path.abspath(route_launch_args(route, map_arg='map')['map']),
         'params_file': params_file,
         'use_sim_time': 'True',
         'autostart': 'True',
         'use_composition': 'False',
-    })
+    }
     nav2_share = get_package_share_directory('nav2_bringup')
 
     actions = [
@@ -65,8 +67,7 @@ def launch_setup(context, *args, **kwargs):
         # only ever see real scans.
         TimerAction(period=float(nav2_delay), actions=[IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(nav2_share, 'launch', 'bringup_launch.py')),
-            launch_arguments={key: value for key, value in nav2_args.items()
-                              if key in ('map', 'params_file', 'use_sim_time', 'autostart', 'use_composition')}.items(),
+            launch_arguments=bringup_args.items(),
         )]),
     ]
     if use_rviz:

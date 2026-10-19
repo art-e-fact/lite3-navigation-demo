@@ -6,11 +6,12 @@ offscreen RGB camera that trails the robot base and writes an mp4.
 Frames come from Newton's GL viewer via ``ViewerGL.get_frame`` so the video looks
 like the Newton screen, headless or not (like MuJoCo's EGL recorder):
 
-* ``headless: false``: the interactive window, at its own resolution; its camera
-  is driven to the follow pose while recording. The mp4 is locked to that
-  resolution at start; if the window's framebuffer later changes size (e.g. a
-  macOS Retina backing-scale change when the window moves between displays),
-  later frames are resampled back to the locked size instead of crashing.
+* ``headless: false``: the interactive window, at its own resolution. Each frame
+  is drawn with the viewer's own renderer at the follow pose but never presented,
+  and the user's camera is put back, so the window stays free to orbit. The mp4
+  is locked to the window's resolution at start; if the framebuffer later changes
+  size (e.g. a macOS Retina backing-scale change when the window moves between
+  displays), later frames are resampled back to the locked size instead of crashing.
 * ``headless: true``: a private EGL-backed ``ViewerGL`` at ``width`` x ``height``
   that needs no display server.  The physics loop never sees it, so the CUDA
   graph stays enabled.
@@ -41,19 +42,21 @@ import numpy as np
 from PIL import Image
 import warp as wp
 
+from sensors.common.transforms import yaw_from_quat_xyzw
 from sensors.newton.geometry import camera_transforms
 from simulation_config import FollowCameraConfig
-from utils import log
+from utils import log, resolve_logger, split_pose
 
 WORLD_UP = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 # libx264 macro block edge [px]: frames are cropped to a multiple of it (800x600 is not
 # a multiple of 16, so 8 rather than imageio's default 16).
 VIDEO_MACRO_BLOCK_PX = 8
+# Below this |forward x up| the camera looks straight up/down and "right" is undefined.
+PARALLEL_EPSILON = 1e-6
 
 
-def _yaw_from_quat_xyzw(quat_xyzw) -> float:
-    x, y, z, w = (float(component) for component in quat_xyzw)
-    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+def _floor_to_macro_block(pixels: int) -> int:
+    return pixels - pixels % VIDEO_MACRO_BLOCK_PX
 
 
 def _look_rotation(forward: np.ndarray) -> np.ndarray:
@@ -61,7 +64,7 @@ def _look_rotation(forward: np.ndarray) -> np.ndarray:
     forward = forward / np.linalg.norm(forward)
     right = np.cross(forward, WORLD_UP)
     norm = np.linalg.norm(right)
-    if norm < 1e-6:  # looking straight up/down: pick an arbitrary stable right vector
+    if norm < PARALLEL_EPSILON:  # looking straight up/down: pick an arbitrary stable right vector
         right = np.array([0.0, -1.0, 0.0], dtype=np.float64)
     else:
         right = right / norm
@@ -93,7 +96,7 @@ class NewtonFollowCameraRecorder:
         viewer=None,
     ):
         self.model = model
-        self.logger = _resolve_logger(node_or_logger)
+        self.logger = resolve_logger(node_or_logger)
         self.config = config or FollowCameraConfig()
         self.robot_body_index = int(robot_body_index)
         self.bvh = bvh
@@ -116,9 +119,7 @@ class NewtonFollowCameraRecorder:
             return
 
         if not self.video_path:
-            raise ValueError(
-                "follow_camera_video_path must be set when enable_follow_camera is true"
-            )
+            raise ValueError("video_path must be set when the camera is enabled")
 
         output_path = Path(self.video_path).expanduser()
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +134,7 @@ class NewtonFollowCameraRecorder:
         if self.viewer is not None:
             # The mp4 takes the viewer's window size; width/height size the raytracer.
             width, height = self.viewer.renderer.window.get_framebuffer_size()
-            width, height = width - width % VIDEO_MACRO_BLOCK_PX, height - height % VIDEO_MACRO_BLOCK_PX  # see render()
+            width, height = _floor_to_macro_block(width), _floor_to_macro_block(height)  # see render()
             source = "Newton viewer (EGL)" if self._owns_viewer else "Newton viewer"
         else:
             self.sensor = SensorTiledCamera(model, load_textures=False)
@@ -164,27 +165,33 @@ class NewtonFollowCameraRecorder:
             f"({width}x{height} @ {self.fps:.1f} Hz, fov {self.fov_deg:.0f} deg, {source})"
         )
 
-    def render(self, state, refit: bool = True, timestamp: float = 0.0) -> np.ndarray | None:
-        """Render one RGB frame (H, W, 3) uint8 without writing it to the video."""
+    def render(self, state, refit: bool = True, timestamp: float = 0.0,
+               log_state: bool = True) -> np.ndarray | None:
+        """Render one RGB frame (H, W, 3) uint8 without writing it to the video.
+
+        ``log_state=False`` when another camera already logged *state* into the shared viewer.
+        """
         if not self.enabled or self.closed:
             return None
         position, forward, azimuth, elevation = self._camera_pose(state)
 
         if self.viewer is not None:
-            # Drive the interactive camera to the follow pose and grab the GL frame.
-            self.viewer.set_camera(
-                wp.vec3(*position), math.degrees(elevation), math.degrees(azimuth)
-            )
-            self.viewer.begin_frame(timestamp)
-            self.viewer.log_state(state)
-            self.viewer.end_frame()
-            frame = self.viewer.get_frame().numpy()
+            viewer, camera = self.viewer, self.viewer.camera
+            own_view = (wp.vec3(*camera.pos), camera.pitch, camera.yaw)
+            viewer.set_camera(wp.vec3(*position), math.degrees(elevation), math.degrees(azimuth))
+            if log_state:
+                viewer.begin_frame(timestamp)
+                viewer.log_state(state)
+            # The viewer's own draw call without presenting it, so the window (shared
+            # with the user and the other camera) keeps its own camera.
+            viewer.renderer.render(camera, viewer.objects, viewer.lines, viewer.wireframe_shapes, viewer.arrows)
+            frame = viewer.get_frame().numpy()
+            viewer.set_camera(*own_view)
             # Crop to the writer's macro block so odd window sizes are not resampled.
             frame_height, frame_width = frame.shape[:2]
-            return np.ascontiguousarray(frame[
-                : frame_height - frame_height % VIDEO_MACRO_BLOCK_PX,
-                : frame_width - frame_width % VIDEO_MACRO_BLOCK_PX,
-            ])
+            return np.ascontiguousarray(
+                frame[: _floor_to_macro_block(frame_height), : _floor_to_macro_block(frame_width)]
+            )
 
         if refit and self.bvh is not None:
             self.bvh.refit(state)
@@ -202,9 +209,9 @@ class NewtonFollowCameraRecorder:
         rgba = self.sensor.utils.to_rgba_from_color(self.color_image).numpy()
         return np.ascontiguousarray(rgba[0, :, :, :3])
 
-    def update(self, state, refit: bool = True, timestamp: float = 0.0) -> None:
+    def update(self, state, refit: bool = True, timestamp: float = 0.0, log_state: bool = True) -> None:
         """Render one frame and append it to the video."""
-        frame = self.render(state, refit=refit, timestamp=timestamp)
+        frame = self.render(state, refit=refit, timestamp=timestamp, log_state=log_state)
         if frame is None:
             return
         if frame.shape[:2] != self.frame_size:
@@ -240,8 +247,7 @@ class NewtonFollowCameraRecorder:
 
     def _camera_pose(self, state) -> tuple[np.ndarray, np.ndarray, float, float]:
         """Camera position, forward unit vector, azimuth and elevation (radians)."""
-        body_q = state.body_q.numpy()[self.robot_body_index]
-        target = np.asarray(body_q[0:3], dtype=np.float64).copy()
+        target, quat_xyzw = split_pose(state.body_q.numpy()[self.robot_body_index])
         target[2] += float(self.config.target_height_m)
         if self._lookat is None:
             self._lookat = target
@@ -249,7 +255,7 @@ class NewtonFollowCameraRecorder:
             alpha = float(np.clip(self.config.smoothing, 0.0, 1.0))
             self._lookat = (1.0 - alpha) * self._lookat + alpha * target
 
-        yaw = _yaw_from_quat_xyzw(body_q[3:7]) if self.config.follow_yaw else 0.0
+        yaw = yaw_from_quat_xyzw(quat_xyzw) if self.config.follow_yaw else 0.0
         azimuth = yaw + math.radians(self.config.azimuth_offset_deg)
         elevation = math.radians(self.config.elevation_deg)
         forward = np.array(
@@ -283,11 +289,3 @@ def _create_headless_viewer(model, width: int, height: int, logger):
     except Exception as exc:  # no EGL/GL at all: fall back to the raytracer
         log(logger, "warn", f"No headless GL viewer for the follow camera, raytracing instead: {exc}")
         return None
-
-
-def _resolve_logger(node_or_logger):
-    if node_or_logger is None:
-        return None
-    if hasattr(node_or_logger, "get_logger"):
-        return node_or_logger.get_logger()
-    return node_or_logger

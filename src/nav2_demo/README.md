@@ -17,7 +17,7 @@ route's map. Uses
 From the repository root, on one of the maps here (or your own):
 
 ```bash
-pixi run record-route --name lab   # --map <other.yaml> for another map
+artefacts-route record --name lab --map src/nav2_demo/maps/depot.yaml
 ```
 
 This opens RViz with the map. Click **2D Pose Estimate** where the robot
@@ -28,7 +28,7 @@ open floor: the Lite3 is 0.56 x 0.30 m and walks at 0.3 m/s.
 ## Run it
 
 ```bash
-pixi run -e artefacts artefacts run test-nav2-route
+artefacts run test-nav2-route
 ```
 
 Drives the route recorded last. The params in `artefacts.yaml` pick the viewers
@@ -44,8 +44,8 @@ speed (`linear_vel`).
 - `config/nav2_lite3.yaml`: Nav2's default parameters with the Lite3's frames,
   footprint and speeds, and Regulated Pure Pursuit as the controller; the
   header lists every change.
-- `test/sim_control_harness.py`: starts the simulator in its own pixi
-  environment, then the nav launch once `/clock` ticks, and watches both.
+- `test/sim_control_harness.py`: starts the simulator as a subprocess
+  of this interpreter, then the nav launch once `/clock` ticks, and watches both.
 - `test/test_route.py`: the pytest. It extrudes the world from the route's
   map, starts the simulator (Newton, the Lite3 with its 2D lidar) with
   `--set robot.start_pose.*` from the route, launches the nav side, and

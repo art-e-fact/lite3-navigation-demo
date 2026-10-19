@@ -14,3 +14,6 @@ FREE_JOINT_Q_COUNT = 7
 FREE_JOINT_QD_COUNT = 6
 # (x, y, yaw) of the robot spawn in a static scene.
 DEFAULT_ROBOT_START_POSE = (-5.0, 0.0, 0.0)
+# Free joint velocity layout: linear then angular, both in the world frame.
+FREE_JOINT_LINVEL = slice(0, 3)
+FREE_JOINT_ANGVEL = slice(3, 6)
