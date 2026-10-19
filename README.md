@@ -9,6 +9,8 @@ This demo showcases [artefacts-toolkit-navigation](https://github.com/art-e-fact
 
 ## Build
 
+_Note: This project can also be run with `pixi`. Please see the [pixi branch](https://github.com/art-e-fact/lite3-navigation-demo/tree/pixi)._
+
 ```bash
 git submodule update --init --recursive
 source /opt/ros/jazzy/setup.bash
