@@ -4,6 +4,8 @@ log/
 rosbuild/
 .vscode/
 __pycache__/
+venv/
+.venv/
 *.pyc
 .pytest_cache/
 .python-version
