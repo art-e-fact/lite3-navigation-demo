@@ -3,22 +3,29 @@ route's map, and check that the robot got round.
 
     artefacts run test-nav2-route
 
+The route is driven once per run (the module-scoped ``run`` fixture); each test
+then checks one aspect of the result with the toolkit's assert helpers, so the
+dashboard shows them one by one.
+
 Runs under `artefacts run` only: it reads the scenario's params from artefacts.yaml
 (headless, rviz, linear_vel; a list drives the route once per value) and writes
 everything into the run's upload directory. It drives the route recorded last with
 `artefacts-route record`. The simulator (Newton) runs as a subprocess
 with the robot spawned at the route's start; Nav2 and rl_deploy are launched
-via nav2_route.launch.py; the test itself drives the route with
+via nav2_route.launch.py; the fixture drives the route with
 artefacts_toolkit_navigation.follow_route().
 """
 
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from artefacts_toolkit.config import get_artefacts_params
-from artefacts_toolkit_navigation import follow_route, load_route, map_to_world, route_launch_args
+from artefacts_toolkit_navigation import (
+    assert_each_waypoint_reached, assert_final_pose, assert_max_recoveries, assert_min_clearance,
+    assert_route_completed, follow_route, load_route, map_to_world, route_launch_args)
 
 from report import path_chart, speed_chart, trace_metrics, waypoint_chart, write_trace_csv
 from sim_control_harness import SimControlHarness, StopReason
@@ -38,11 +45,16 @@ FOLLOW_ELEVATION_DEG = -35.0
 OVERHEAD_ELEVATION_DEG = -89.0  # not -90: looking straight down leaves the camera up vector undefined
 OVERHEAD_DISTANCE_M = 10.0
 OVERHEAD_SMOOTHING = 0.03  # per-frame blend towards the robot (0..1); low keeps the top-down view steady
+WAYPOINT_TOLERANCE_M = 0.5  # how close to a waypoint counts as reached
 MAX_FINAL_ERROR_M = 0.5  # how close to the last waypoint counts as arrived
+MIN_CLEARANCE_M = 0.2  # lidar to nearest wall; the lidar sits mid-body, so this is roughly the body's half width
+MAX_RECOVERIES = 2  # spins/backups Nav2 may need before the run counts as a struggle
 VIDEO_FPS = 10.0  # each camera frame costs ~7 ms of wall time (the viewer re-uploads every wall shape)
 
 
-def test_route_is_completed(tmp_path):
+@pytest.fixture(scope='module')
+def run(tmp_path_factory):
+    """Drive the route once; the result and the harness (for its log tails) for every test."""
     METRICS.unlink(missing_ok=True)  # or a run that dies early reports the previous run's
     route = load_route()  # the route recorded last
 
@@ -78,7 +90,7 @@ def test_route_is_completed(tmp_path):
     with SimControlHarness(
         sim_config,
         config_path=OUTPUT_FOLDER / f'{route.name}_sim.yaml',
-        log_dir=tmp_path,
+        log_dir=tmp_path_factory.mktemp('harness'),
         repo_root=REPO_ROOT,
         sim_package_root=SIM_PACKAGE_ROOT,
         control_package='nav2_demo',
@@ -112,7 +124,27 @@ def test_route_is_completed(tmp_path):
     if reason is StopReason.CONTROL_EXITED:
         pytest.fail(f'Nav2 launch exited unexpectedly:\n{harness.control_log_tail()}')
 
-    assert result.succeeded, (
-        f'{result.outcome}: {result.error}\n--- nav log ---\n{harness.control_log_tail(40)}')
-    assert result.final_pos_error_m is not None and result.final_pos_error_m < MAX_FINAL_ERROR_M, (
-        f'ended {result.final_pos_error_m:.2f} m from the last waypoint')
+    return SimpleNamespace(result=result, harness=harness)
+
+
+def test_route_completed(run):
+    try:
+        assert_route_completed(run.result)
+    except AssertionError as error:
+        pytest.fail(f'{error}\n--- nav log ---\n{run.harness.control_log_tail(40)}')
+
+
+def test_each_waypoint_reached(run):
+    assert_each_waypoint_reached(run.result, tolerance_m=WAYPOINT_TOLERANCE_M)
+
+
+def test_final_pose(run):
+    assert_final_pose(run.result, max_pos_error_m=MAX_FINAL_ERROR_M)
+
+
+def test_min_clearance(run):
+    assert_min_clearance(run.result, MIN_CLEARANCE_M)
+
+
+def test_max_recoveries(run):
+    assert_max_recoveries(run.result, MAX_RECOVERIES)

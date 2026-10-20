@@ -17,9 +17,9 @@ jobs:
       defaults:
         metrics: metrics.json
         params:
-          headless: false  # false shows the Newton viewer
-          rviz: true  # true also opens Nav2's RViz view
+          headless: true  # false shows the Newton viewer
+          rviz: false  # true also opens Nav2's RViz view
           linear_vel: [0.2, 0.3, 0.4]  # m/s, one run per value (velocity_smoother caps at 0.4)
       settings:
-        - name: test_route_is_completed
+        - name: nav2_route
           pytest_file: src/nav2_demo/test/test_route.py
